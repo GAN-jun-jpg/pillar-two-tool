@@ -1,0 +1,135 @@
+{
+  "minimum_tax_rate": 0.15,
+  "money_unit": "万元",
+  "rounding": {
+    "output_decimals": 2,
+    "note": "calculator.py 输出边界统一保留 2 位小数，避免浮点尾差流入分配层与 GIR 导出"
+  },
+  "etr": {
+    "formula": "covered_taxes / globe_income",
+    "globe_income": "max(0, profit)；profit 为 SBIE 调整前的 GloBE 利润",
+    "profit_le_zero": "ETR 返回 null，风险等级为 n/a，不进入补税计算",
+    "denominator_note": "官方 ETR 分母为 GloBE Income，SBIE 扣除前"
+  },
+  "excess_profit": {
+    "formula": "max(0, globe_profit - sbie)",
+    "description": "超额利润，也是 Top-up Tax 的计税基数"
+  },
+  "topup_tax": {
+    "formula": "(0.15 - etr) * excess_profit",
+    "condition": "etr 不为 null 且 etr < 0.15",
+    "etr_above_or_equal": "无需补税，topup_rate 和 topup_tax 返回 null",
+    "excess_profit_le_zero": "无补税，topup_tax = 0"
+  },
+  "covered_taxes": {
+    "formula": "current_tax + deferred_used - recapture_amount + globe_loss_dta_used + recapture_credit",
+    "components": [
+      "当期所得税 current_tax",
+      "递延所得税费用 deferred_used（正数按 15% 封顶，负数照常计入）",
+      "减去 DTL Recapture 金额",
+      "加上 GloBE Loss DTA 本年释放额",
+      "加上 Recapture 后实际回转的回加额"
+    ],
+    "ente_adjustment": "如果启用 ENTE，负 Covered Taxes 归零并建立结转；后续递延税回转由结转吸收",
+    "current_tax_sign": "当期所得税允许为负数；负值按原值计入 Covered Taxes，后续由 ENTE 等规则处理"
+  },
+  "deferred_tax_cap": {
+    "condition": "deferred_tax > 0",
+    "cap": "0.15 * max(0, globe_profit)",
+    "rule": "正递延税超过上限时，只按上限计入 Covered Taxes",
+    "article": "GloBE Art 4.4.3",
+    "negative_deferred": "负递延税为保守项，照常计入，不封顶"
+  },
+  "sbie": {
+    "formula": "max(0, payroll) * payroll_rate + max(0, tangible_assets) * asset_rate",
+    "payroll_rates": {
+      "2023": 0.1,
+      "2024": 0.098,
+      "2025": 0.096,
+      "2026": 0.094,
+      "2027": 0.092,
+      "2028": 0.09,
+      "2029": 0.082,
+      "2030": 0.074,
+      "2031": 0.066,
+      "2032": 0.058
+    },
+    "asset_rates": {
+      "2023": 0.08,
+      "2024": 0.078,
+      "2025": 0.076,
+      "2026": 0.074,
+      "2027": 0.072,
+      "2028": 0.07,
+      "2029": 0.066,
+      "2030": 0.062,
+      "2031": 0.058,
+      "2032": 0.054
+    },
+    "steady_state_rate": 0.05,
+    "steady_state_from_year": 2033,
+    "carryforward": {
+      "article": "GloBE Art 5.3.4",
+      "rule": "当年 SBIE 超过当年利润时，未用部分可结转以后年度；本工具只接收年初未用 SBIE 结转，不自动追踪 5 年有效期",
+      "input_field": "sbie_cf",
+      "output_field": "sbie_cf_out"
+    }
+  },
+  "safe_harbour": {
+    "priority": "安全港检测优先于所有风险判定；任一测试通过即豁免 GloBE 补税",
+    "de_minimis": {
+      "oecd_currency": "EUR",
+      "oecd_revenue_max": 10000000,
+      "oecd_profit_max": 1000000,
+      "oecd_revenue_max_display": "1000 万欧元",
+      "oecd_profit_max_display": "100 万欧元",
+      "tool_unit": "万元",
+      "tool_revenue_max": 8000.0,
+      "tool_profit_max": 800.0,
+      "conversion_assumption_cny_per_eur": 8.0,
+      "conversion_note": "工具内部统一使用人民币万元；按约 8 CNY/EUR 将 1000 万欧元/100 万欧元折算为 8000 万元/800 万元",
+      "revenue_max": 8000.0,
+      "profit_max": 800.0,
+      "unit": "万元",
+      "conditions": "revenue > 0 且 revenue <= 8000 且 profit <= 800"
+    },
+    "simplified_etr": {
+      "thresholds": {
+        "2023": 0.15,
+        "2024": 0.15,
+        "2025": 0.16,
+        "2026": 0.17
+      },
+      "condition": "calc_year 在阈值表中且 etr >= threshold",
+      "note": "2027 年起过渡期结束，不适用简化 ETR 测试"
+    },
+    "routine_profit": {
+      "condition": "profit > 0 且 sbie > 0 且 profit <= sbie",
+      "description": "利润未超过 SBIE 时，视为例行利润，豁免补税"
+    }
+  },
+  "globe_loss_election": {
+    "article": "GloBE Art 4.5",
+    "election_once_and_forall": true,
+    "loss_year": "raw_profit < 0 时，创建 DTA = abs(raw_profit) * 0.15",
+    "profit_year": "adjusted_profit > 0 且 balance > 0 时，释放额 = min(balance, adjusted_profit * 0.15)",
+    "output_fields": [
+      "dta_created",
+      "dta_used",
+      "balance_out",
+      "election_active"
+    ]
+  },
+  "ente": {
+    "article": "GloBE Art 5.2.1 / 2024-06 行政指引",
+    "negative_year": "Adjusted Covered Taxes < 0 时，归零并建立等额 ENTE 结转",
+    "later_year": "后续年度递延税回转由 ENTE 结转吸收，直至用尽",
+    "input_field": "ente_cf",
+    "output_fields": [
+      "ente_cf_in",
+      "ente_cf_used",
+      "ente_cf_out"
+    ],
+    "reference_example": "OECD Example 5.2.1-1"
+  }
+}

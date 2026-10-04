@@ -1,0 +1,83 @@
+{
+  "dtl_types": [
+    "Accelerated Depreciation",
+    "Inventory",
+    "Lease",
+    "Fixed Asset",
+    "R&D Capitalization",
+    "Pension",
+    "Goodwill",
+    "Other"
+  ],
+  "default_qualified": true,
+  "non_qualified_hint": {
+    "Pension": "养老金义务通常不触发 Recapture"
+  },
+  "recapture": {
+    "article": "GloBE Art 4.4.4",
+    "scope": "只有 qualified DTL 受 Recapture 约束",
+    "window_years": 5,
+    "trigger_year_formula": "entry.year + 5",
+    "remaining_formula": "max(0, entry.amount - sum(reversals where reversal.year <= calc_year))",
+    "trigger_condition": "calc_year == entry.year + 5 且 remaining > 0",
+    "effect": "remaining 一次性从 Covered Taxes 中扣除",
+    "status_note": "引擎为单年无状态计算，请逐年计算以确保触发年被覆盖"
+  },
+  "reversal_credit": {
+    "article": "GloBE Art 4.4.4",
+    "rule": "已在触发年计提 Recapture 的 qualified DTL，其后年度实际发生回转时，回转金额在回转当年加回 Covered Taxes",
+    "condition": "calc_year > entry.year + 5",
+    "credit_amount": "sum(reversals where reversal.year == calc_year)，仅限触发年时仍有剩余的 DTL",
+    "no_double_count": "触发年当年及之前的回转已降低 Recapture 基数，不再重复回加"
+  },
+  "status_rules": {
+    "expiry_year_formula": "entry.year + 4",
+    "years_left_formula": "expiry_year - calc_year",
+    "statuses": {
+      "excluded": {
+        "condition": "qualified == false",
+        "label": "不适用 Recapture"
+      },
+      "cleared": {
+        "condition": "remaining <= 0",
+        "label": "已按时清零"
+      },
+      "recaptured": {
+        "condition": "calc_year > expiry_year 且 remaining > 0",
+        "label": "已触发 Recapture"
+      },
+      "near_expiry": {
+        "condition": "years_left <= 1 且 remaining > 0",
+        "label": "临近到期"
+      },
+      "active": {
+        "condition": "其他 remaining > 0 情况",
+        "label": "有效"
+      }
+    },
+    "expiry_warning_threshold": {
+      "info_years_left_max": 2,
+      "warning_years_left_max": 0
+    }
+  },
+  "ledger_entry_schema": {
+    "id": "string",
+    "year": "int",
+    "amount": "float",
+    "type": "string，见 dtl_types",
+    "qualified": "bool",
+    "reversals": [
+      {
+        "id": "string",
+        "year": "int",
+        "amount": "float"
+      }
+    ]
+  },
+  "params": {
+    "recapture_offset": 5,
+    "expiry_offset": 4,
+    "near_expiry_years_left_max": 1,
+    "qualified_default": true
+  }
+}

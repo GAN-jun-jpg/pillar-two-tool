@@ -1,0 +1,18 @@
+# Pillar Two 全球最低税测算工具 · 依赖清单
+# 环境：Python 3.12.0（Windows）
+#
+# 【封版固定版本】—— 为保证半年后还能原样跑起来，这里锁定当时验证过的版本。
+# 如果只是日常开发想装最新版，把 "==" 换成 ">=" 即可。
+streamlit==1.60.0
+pandas==3.0.2
+plotly==6.8.0
+numpy==2.4.6
+openpyxl==3.1.5
+XlsxWriter==3.2.9
+python-docx==1.2.0
+lxml==6.1.0
+Pillow==11.2.1
+requests==2.34.0
+openai==2.38.0
+python-dotenv==1.2.2
+pytest==9.0.3

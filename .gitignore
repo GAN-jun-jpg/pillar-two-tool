@@ -1,0 +1,34 @@
+# ── 密钥与本地配置（绝不能提交）──
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+
+# ── 本地数据库（方案库 / 审计库 / 规则版本库）──
+# 注意：data/pillar_two.db 是演示数据，已随仓库提供，故不在此列
+data/*.db
+!data/pillar_two.db
+Agent/rules/*.db
+Agent/rules/versions/
+
+# ── 运行产物与缓存 ──
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.playwright-cli/
+.superpowers/
+release/
+publish/
+*_candidate/
+*_before_active/
+
+# ── 交付物与竞赛材料（不属于工具本体）──
+答辩交付/
+魔搭部署_新版/
+*_workspace/
+*挑战赛*
+*.pptx
+*.pdf
+*.docx
+*.log

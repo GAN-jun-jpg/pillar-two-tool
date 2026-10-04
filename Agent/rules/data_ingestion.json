@@ -1,0 +1,180 @@
+{
+  "ingestion_version": "0.1.0",
+  "source_files": [
+    "utils.py",
+    "unit_convert.py",
+    "exchange_rate.py"
+  ],
+  "unit_conversion": {
+    "target_unit": "万元",
+    "factors_to_wan": {
+      "万亿元": 100000000,
+      "万亿": 100000000,
+      "亿元": 10000,
+      "亿": 10000,
+      "万元": 1,
+      "万": 1,
+      "元": 0.0001
+    },
+    "missing_tokens": [
+      "",
+      "-",
+      "—",
+      "--"
+    ],
+    "parentheses_negative": "字符串形如 (123.45) 时转换为 -123.45",
+    "bare_number_default": "裸数字默认按元处理；同花顺 CSV 裸数字也是元"
+  },
+  "currency": {
+    "supported_currencies": {
+      "CNY": "人民币",
+      "USD": "美元",
+      "EUR": "欧元",
+      "HKD": "港币",
+      "SGD": "新加坡元",
+      "GBP": "英镑",
+      "JPY": "日元",
+      "AUD": "澳元",
+      "CAD": "加元",
+      "CHF": "瑞士法郎"
+    },
+    "default_currency": "CNY",
+    "conversion": "非人民币金额乘以汇率换算为人民币万元",
+    "missing_rate_behavior": "批量导入时遇到未配置汇率的币种，记录错误并要求补充汇率"
+  },
+  "exchange_rate_sources": {
+    "priority": [
+      "sina",
+      "open.er-api.com",
+      "frankfurter.app"
+    ],
+    "sina_symbols": {
+      "USD": "fx_susdcny",
+      "EUR": "fx_seurcny",
+      "HKD": "fx_shkdcny",
+      "SGD": "fx_ssgdcny",
+      "GBP": "fx_sgbpcny",
+      "JPY": "fx_sjpycny",
+      "CHF": "fx_schfcny",
+      "CAD": "fx_scadcny"
+    },
+    "fallback": "新浪实时 -> open.er-api.com 每日汇率 -> frankfurter.app",
+    "manual_override": "所有来源失败时，界面提示用户手动填写汇率"
+  },
+  "batch_import_column_keywords": {
+    "name": [
+      "国家",
+      "辖区",
+      "name",
+      "country",
+      "jurisdiction"
+    ],
+    "profit": [
+      "利润",
+      "profit",
+      "globe"
+    ],
+    "current_tax": [
+      "当期所得税",
+      "current_tax",
+      "税额",
+      "tax",
+      "税"
+    ],
+    "deferred_tax": [
+      "递延",
+      "deferred",
+      "dtl",
+      "dta"
+    ],
+    "payroll": [
+      "薪酬",
+      "工资",
+      "payroll",
+      "salary",
+      "wage"
+    ],
+    "tangible_assets": [
+      "有形资产",
+      "有形",
+      "固定资产",
+      "tangible",
+      "asset",
+      "ppe"
+    ],
+    "parent_name": [
+      "母公司",
+      "母辖区",
+      "parent",
+      "母"
+    ],
+    "ownership": [
+      "持股",
+      "ownership",
+      "股权",
+      "比例"
+    ],
+    "qdmtt_applies": [
+      "qdmtt",
+      "境内补足",
+      "合格境内"
+    ],
+    "utpr_applies": [
+      "utpr",
+      "低税支付"
+    ],
+    "revenue": [
+      "收入",
+      "revenue",
+      "营收",
+      "总收入",
+      "营业收入"
+    ],
+    "currency": [
+      "币种",
+      "币别",
+      "货币",
+      "currency",
+      "ccy"
+    ]
+  },
+  "boolean_parsing": {
+    "true_values": [
+      "是",
+      "yes",
+      "true",
+      "y",
+      "1",
+      "✓",
+      "✔"
+    ],
+    "false_values": [
+      "否",
+      "no",
+      "false",
+      "n",
+      "0",
+      "✗",
+      "✘"
+    ]
+  },
+  "dtl_type_from_chinese": {
+    "固定资产": "Fixed Asset",
+    "固定资本": "Fixed Asset",
+    "存货": "Inventory",
+    "研发资本": "R&D Capitalization",
+    "租赁": "Lease",
+    "养老金": "Pension",
+    "商誉": "Goodwill",
+    "加速折旧": "Accelerated Depreciation",
+    "其他": "Other"
+  },
+  "excluded_column_keywords": {
+    "tangible_assets": [
+      "无形"
+    ]
+  },
+  "unrecognized_columns_observed": [
+    "无形资产（万元）"
+  ]
+}

@@ -1,0 +1,79 @@
+{
+  "agreed_rule_order": [
+    "QDMTT",
+    "IIR",
+    "UTPR"
+  ],
+  "defaults": {
+    "parent_idx": null,
+    "ownership": 1.0,
+    "qdmtt_applies": false,
+    "utpr_applies": true
+  },
+  "qdmtt": {
+    "article": "GloBE Art 5.2 / Agreed Rule Order",
+    "condition": "topup_tax > 0 且 qdmtt_applies == true",
+    "effect": "补税由低税辖区自行征收，金额等于该辖区 topup_tax",
+    "coverage": "QDMTT 已覆盖的辖区不再进入 IIR / UTPR",
+    "utpr_note": "QDMTT 辖区不参与 UTPR 分摊"
+  },
+  "iir": {
+    "article": "GloBE Art 2.1–2.5（多层持股另见 Art 2.1.4 POPE / Art 2.3.2 IIR 抵免）",
+    "condition": "topup_tax > 0 且该辖区存在上级母公司，且该层间接持股达到最低门槛",
+    "chain": "沿 parent_idx 逐层上溯；每层的间接持股 = 路径上各层持股比例连乘（Art 10.1 inclusive ownership interest）",
+    "formula": "allocable = round(topup_tax * 该层间接持股, 2)",
+    "offset_formula": "offset = allocable * 下层已实际纳入 IIR 的层数；final = max(0, allocable - offset)。单链结构下⇒ 直接母公司按其持股全额上收，其上各层 final = 0",
+    "residual_formula": "residual = round(topup_tax - 实际纳入合计, 2)（含外部少数股东部分与未达门槛部分）",
+    "collected_to": "实际纳入的母公司（单链下即直接母公司）",
+    "min_ownership": 0.1,
+    "min_ownership_rule": "Art 2.1.1：间接持股低于门槛的母公司不适用 IIR，该部分并入 residual → UTPR 残池；未达门槛金额在 below_threshold 中留痕",
+    "upe_rule": "parent_idx 为空视为 UPE；UPE 自身补税直接缴纳，不进入 UTPR 残池",
+    "transparency": "offsets 明细逐条记录「上层应分担多少 / 被抵免多少 / 最终多少」，便于在界面与报告中展示多层链条",
+    "official_vectors": "Example 2.3.2-1（B 收 10、A 应分担 6 被全额抵免）、Example 2.3.2-3（C 收 10、B 应分担 4 被抵免）——见 test_oecd_vectors.py",
+    "known_limits": "每辖区仅支持单一母公司，无法表达同一辖区被多个母公司分别持股的多路径结构（Example 2.3.2-2）；不建模各辖区是否已实施 IIR"
+  },
+  "utpr": {
+    "article": "GloBE Art 2.6",
+    "pool_formula": "IIR 未覆盖的残余补税，排除 UPE 自身补税和 QDMTT 已覆盖辖区",
+    "applies_field": "utpr_applies",
+    "excluded": "QDMTT 已覆盖辖区不承担 UTPR",
+    "allocation_formula": "amount = round(total_residual * 0.5 * (asset_share + payroll_share), 2)",
+    "asset_share": "jurisdiction.tangible_assets_original / sum(tangible_assets_original of eligible jurisdictions)",
+    "payroll_share": "jurisdiction.payroll_original / sum(payroll_original of eligible jurisdictions)",
+    "weighting": "50% 有形资产 + 50% 薪酬",
+    "rounding_rule": "尾差归最大接收方，保证 allocated 合计等于 residual pool",
+    "detail_rounding_rule": "逐笔来源拆分时，尾差归该来源分得最大的接收方"
+  },
+  "net_liability": {
+    "formula": "QDMTT 自收 + UPE 自身补税 + IIR 母公司上收 + UTPR 分摊",
+    "rounding": "每个辖区最终净负债保留 2 位小数",
+    "total_topup": "所有 net_liability 之和，保留 2 位小数"
+  },
+  "tax_flow": {
+    "sources": "有补税的辖区",
+    "fields": [
+      "qdmtt_retained",
+      "iir_exported",
+      "iir_to_name",
+      "utpr_exported",
+      "utpr_recipients",
+      "retention_rate",
+      "export_rate",
+      "flows"
+    ],
+    "total_fields": [
+      "total_topup_ex_na",
+      "total_retained",
+      "total_exported"
+    ]
+  },
+  "params": {
+    "asset_weight": 0.5,
+    "payroll_weight": 0.5,
+    "rounding_decimals": 2,
+    "default_ownership": 1.0,
+    "default_qdmtt": false,
+    "default_utpr": true,
+    "iir_min_ownership": 0.1
+  }
+}

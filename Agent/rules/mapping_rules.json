@@ -1,0 +1,140 @@
+{
+  "mapping_version": "0.1.0",
+  "source_file": "globe_mapper.py",
+  "unit_conversion": {
+    "formula": "converted_amount = raw_amount * rate * factor",
+    "factor_when_unit_yuan": 0.0001,
+    "factor_when_unit_wan_yuan": 1.0,
+    "target_unit": "万元"
+  },
+  "rules": [
+    {
+      "globe_field": "profit",
+      "label": "GloBE利润",
+      "source": "profit_loss",
+      "source_keys": [
+        "total_profit"
+      ],
+      "formula": "direct",
+      "required": true,
+      "note": "利润表·利润总额（税前利润）",
+      "subject_labels": [
+        "利润总额"
+      ]
+    },
+    {
+      "globe_field": "current_tax",
+      "label": "当期所得税",
+      "source": "profit_loss",
+      "source_keys": [
+        "income_tax_expense",
+        "deferred_tax_expense"
+      ],
+      "formula": "split:income_tax_expense-deferred_tax_expense",
+      "required": true,
+      "note": "所得税费用拆分为当期与递延：当期所得税 = 所得税费用 - 递延所得税费用；若递延所得税未单列，则当期所得税暂按所得税费用处理",
+      "subject_labels": [
+        "所得税费用",
+        "递延所得税费用"
+      ],
+      "split_note": "最终计算前会用 deferred_tax 的最终值校准 current_tax，避免递延税走现金流量表 fallback 时重复计算"
+    },
+    {
+      "globe_field": "deferred_tax",
+      "label": "递延所得税",
+      "source": "profit_loss",
+      "source_keys": [
+        "deferred_tax_expense"
+      ],
+      "formula": "direct",
+      "required": false,
+      "note": "利润表·递延所得税费用；如财报未单列，从附注提取或手动填写",
+      "subject_labels": [
+        "递延所得税费用"
+      ],
+      "fallback": {
+        "source": "cash_flow",
+        "formula": "sum:dtl_increase+dta_decrease",
+        "source_keys": [
+          "dtl_increase",
+          "dta_decrease"
+        ],
+        "subject_labels": [
+          "递延所得税负债增加",
+          "递延所得税资产减少"
+        ],
+        "note": "利润表未单列时按现金流量表补充资料推算：递延税费用 = 负债增加 + 资产减少",
+        "status": "derived",
+        "confidence": 0.7
+      }
+    },
+    {
+      "globe_field": "revenue",
+      "label": "收入（Safe Harbour）",
+      "source": "profit_loss",
+      "source_keys": [
+        "revenue"
+      ],
+      "formula": "direct",
+      "required": false,
+      "note": "利润表·营业总收入（用于 De Minimis Safe Harbour 测试）",
+      "subject_labels": [
+        "营业总收入"
+      ]
+    },
+    {
+      "globe_field": "payroll",
+      "label": "合格薪酬",
+      "source": "cash_flow",
+      "source_keys": [
+        "cash_to_employees"
+      ],
+      "formula": "direct",
+      "required": false,
+      "note": "现金流量表·支付给职工以及为职工支付的现金（用于 SBIE & UTPR 分配因子）",
+      "subject_labels": [
+        "支付给职工的现金"
+      ]
+    },
+    {
+      "globe_field": "tangible_assets",
+      "label": "有形资产",
+      "source": "balance_sheet",
+      "source_keys": [
+        "fixed_assets",
+        "right_of_use_assets"
+      ],
+      "formula": "sum:fixed_assets+right_of_use_assets",
+      "required": false,
+      "note": "资产负债表·固定资产 + 使用权资产（用于 SBIE 计算 & UTPR 分配因子）",
+      "subject_labels": [
+        "固定资产",
+        "使用权资产"
+      ]
+    }
+  ],
+  "status_rules": {
+    "matched": "direct 且 component 全部匹配",
+    "matched_composite": "组合公式且 component 全部匹配",
+    "partial": "部分 component 匹配",
+    "derived": "主规则未命中，使用 fallback",
+    "unmatched": "未找到报表或需手动补充",
+    "confidence": {
+      "matched": 1.0,
+      "matched_composite": 0.85,
+      "partial": "matched_count / total_components * 0.6",
+      "derived": 0.7,
+      "unmatched": 0.0
+    }
+  },
+  "required_fields_for_calculation": [
+    "profit",
+    "current_tax"
+  ],
+  "optional_fields": [
+    "deferred_tax",
+    "revenue",
+    "payroll",
+    "tangible_assets"
+  ]
+}

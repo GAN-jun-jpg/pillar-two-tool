@@ -1,0 +1,315 @@
+{
+  "validation_version": "0.1.0",
+  "source_file": "validator.py",
+  "severity_levels": {
+    "error": "阻断计算",
+    "warning": "需要复核，不阻断",
+    "info": "提示，不阻断"
+  },
+  "rules": [
+    {
+      "code": "E001",
+      "severity": "error",
+      "scope": "single_jurisdiction",
+      "field": "name",
+      "condition": "辖区名称为空",
+      "message": "辖区名称为空",
+      "suggestion": "请输入辖区名称（如「中国大陆」「开曼群岛」）"
+    },
+    {
+      "code": "E002",
+      "severity": "error",
+      "scope": "single_jurisdiction",
+      "field": "profit",
+      "condition": "profit 为 None",
+      "message": "GloBE 利润为空",
+      "suggestion": "请输入 GloBE 利润金额"
+    },
+    {
+      "code": "W015",
+      "severity": "warning",
+      "scope": "single_jurisdiction",
+      "field": "profit",
+      "condition": "profit < 0",
+      "message": "GloBE 利润为负数，按 GloBE Loss 处理",
+      "suggestion": "亏损辖区按 GloBE Income = 0 处理，补税判 n/a；若已做 GloBE Loss Election，本年按亏损×15%创建 Loss DTA，请复核是否为误录"
+    },
+    {
+      "code": "E003",
+      "severity": "error",
+      "scope": "single_jurisdiction",
+      "field": "current_tax",
+      "condition": "current_tax 为 None",
+      "message": "当期所得税为空",
+      "suggestion": "请输入当期所得税（可为负数）",
+      "notes": "允许负数；负当期税按原值计入 Covered Taxes，后续由 ENTE 等规则处理"
+    },
+    {
+      "code": "E004",
+      "severity": "error",
+      "scope": "single_jurisdiction",
+      "field": "ownership",
+      "condition": "ownership 不在 0.0–1.0 之间",
+      "message": "持股比例超出范围",
+      "suggestion": "持股比例应为 0.0–1.0（如 80% 填 0.8）",
+      "params": {
+        "min_ownership": 0.0,
+        "max_ownership": 1.0
+      }
+    },
+    {
+      "code": "E005",
+      "severity": "error",
+      "scope": "single_jurisdiction",
+      "field": "dtl_ledger",
+      "condition": "DTL 产生年份 < 2000 或 > 2100",
+      "message": "DTL 年份异常",
+      "suggestion": "DTL 产生年份应在 2000–2100 之间",
+      "params": {
+        "year_min": 2000,
+        "year_max": 2100
+      }
+    },
+    {
+      "code": "E006",
+      "severity": "error",
+      "scope": "cross_jurisdiction",
+      "field": "name",
+      "condition": "辖区名称重复出现",
+      "message": "辖区名称重复",
+      "suggestion": "每个辖区名称必须唯一，请合并或重命名"
+    },
+    {
+      "code": "E007",
+      "severity": "error",
+      "scope": "cross_jurisdiction",
+      "field": "parent_idx",
+      "condition": "parent_idx 不是有效索引",
+      "message": "母辖区索引不存在",
+      "suggestion": "请输入有效的母辖区索引，或留空表示 UPE"
+    },
+    {
+      "code": "E008",
+      "severity": "error",
+      "scope": "cross_jurisdiction",
+      "field": "parent_idx",
+      "condition": "parent_idx 指向自身",
+      "message": "母辖区不能指向自身",
+      "suggestion": "UPE（最终母公司）请将母辖区留空"
+    },
+    {
+      "code": "E009",
+      "severity": "error",
+      "scope": "cross_jurisdiction",
+      "field": "parent_idx",
+      "condition": "没有任何 parent_idx 为空的辖区",
+      "message": "未找到 UPE（最终母公司）",
+      "suggestion": "至少一个辖区的「母辖区」应留空，表示该辖区为 UPE"
+    },
+    {
+      "code": "E010",
+      "severity": "error",
+      "scope": "cross_jurisdiction",
+      "field": "parent_idx",
+      "condition": "检测到循环持股",
+      "message": "循环持股",
+      "suggestion": "请检查母辖区引用链，破除循环"
+    },
+    {
+      "code": "W001",
+      "severity": "warning",
+      "scope": "single_jurisdiction",
+      "field": "current_tax",
+      "condition": "profit > 0 且 current_tax / profit > 0.80",
+      "message": "有效税率极高",
+      "suggestion": "请核实当期所得税是否正确，是否存在非经常性大额税款",
+      "params": {
+        "max_tax_rate": 0.8
+      }
+    },
+    {
+      "code": "W002",
+      "severity": "warning",
+      "scope": "single_jurisdiction",
+      "field": "current_tax",
+      "condition": "profit > 100 且 0 < current_tax / profit < 0.03",
+      "message": "有效税率极低，疑似低税/零税辖区",
+      "suggestion": "如确为零税辖区（如开曼/BVI），可忽略此警告",
+      "params": {
+        "min_rate": 0.03,
+        "profit_min": 100.0
+      }
+    },
+    {
+      "code": "W003",
+      "severity": "warning",
+      "scope": "single_jurisdiction",
+      "field": "payroll",
+      "condition": "payroll > 0 且 profit > 0 且 payroll > 2 * profit",
+      "message": "薪酬支出超过利润的 2 倍",
+      "suggestion": "请核实薪酬数据是否包含非合格薪酬，或利润数据是否有误",
+      "params": {
+        "multiple": 2.0
+      }
+    },
+    {
+      "code": "W004",
+      "severity": "warning",
+      "scope": "single_jurisdiction",
+      "field": null,
+      "condition": "payroll == 0 且 tangible_assets == 0 且 profit > 1000",
+      "message": "零薪酬+零资产但有利润，疑似无实质经营",
+      "suggestion": "SBIE 排除额为 0，全部利润进入 Top-up Tax 计算，确认是否正确",
+      "params": {
+        "profit_min": 1000.0
+      }
+    },
+    {
+      "code": "W005",
+      "severity": "warning",
+      "scope": "single_jurisdiction",
+      "field": "deferred_tax",
+      "condition": "|deferred_tax| > 0.5 * |current_tax| 且 |current_tax| > 0",
+      "message": "递延所得税超过当期税额的 50%",
+      "suggestion": "大额递延税会显著影响 ETR，请核实是否有一次性 DTL/DTA 确认",
+      "params": {
+        "ratio": 0.5
+      }
+    },
+    {
+      "code": "I001",
+      "severity": "info",
+      "scope": "single_jurisdiction",
+      "field": "revenue",
+      "condition": "revenue == 0 且 profit > 0",
+      "message": "未填写收入，De Minimis Safe Harbour 将不可用",
+      "suggestion": "如需要 Safe Harbour 判定，请补充 revenue 字段"
+    },
+    {
+      "code": "W006",
+      "severity": "warning",
+      "scope": "cross_jurisdiction",
+      "field": null,
+      "condition": "qdmtt_count == 0 且 rows >= 3",
+      "message": "所有辖区均未启用 QDMTT",
+      "suggestion": "如集团在低税辖区有关联公司，建议考虑启用 QDMTT 以保护税源",
+      "params": {
+        "min_jurisdictions": 3
+      }
+    },
+    {
+      "code": "I002",
+      "severity": "info",
+      "scope": "single_jurisdiction",
+      "field": null,
+      "condition": "profit > 0 且 payroll 或 tangible_assets 缺失",
+      "message": "缺少可选字段，SBIE 可能为 0",
+      "suggestion": "补充薪酬和有形资产，避免 ETR 偏低和补税偏高"
+    },
+    {
+      "code": "I003",
+      "severity": "info",
+      "scope": "single_jurisdiction",
+      "field": "dtl_ledger",
+      "condition": "合格 DTL 未回转且 1 <= (entry.year + 4 - calc_year) <= 2",
+      "message": "DTL 临近到期",
+      "suggestion": "应及时安排回转，避免触发 Recapture 惩罚",
+      "params": {
+        "info_years_left_max": 2
+      }
+    },
+    {
+      "code": "W007",
+      "severity": "warning",
+      "scope": "single_jurisdiction",
+      "field": "dtl_ledger",
+      "condition": "合格 DTL 未回转且 (entry.year + 4 - calc_year) <= 0",
+      "message": "DTL 已到期",
+      "suggestion": "应及时安排回转，避免触发 Recapture 惩罚",
+      "params": {
+        "warning_years_left_max": 0
+      }
+    },
+    {
+      "code": "W008",
+      "severity": "warning",
+      "scope": "single_jurisdiction",
+      "field": "profit/current_tax/revenue/payroll/tangible_assets",
+      "condition": "任一字段 abs(value) >= 5000000",
+      "message": "金额量级异常，疑似未按万元换算",
+      "suggestion": "请确认金额单位：如按元填写会放大 1 万倍，应换算为万元",
+      "params": {
+        "amount_threshold": 5000000.0
+      }
+    },
+    {
+      "code": "W009",
+      "severity": "warning",
+      "scope": "dtl_entry",
+      "field": "dtl_ledger",
+      "condition": "amount >= 0 且 sum(reversals.amount) > amount + 0.005",
+      "message": "回转合计超过 DTL 原值",
+      "suggestion": "请核对回转记录：超额部分通常为误录，应删除或修正",
+      "params": {
+        "overage_tolerance": 0.005
+      }
+    },
+    {
+      "code": "W010",
+      "severity": "warning",
+      "scope": "dtl_entry",
+      "field": "dtl_ledger",
+      "condition": "任一 reversal.year < entry.year",
+      "message": "回转年份早于 DTL 产生年份",
+      "suggestion": "回转只能发生在 DTL 产生之后，请修正回转年份"
+    },
+    {
+      "code": "W011",
+      "severity": "warning",
+      "scope": "dtl_entry",
+      "field": "dtl_ledger",
+      "condition": "entry.year > calc_year",
+      "message": "DTL 产生年份晚于当前财年",
+      "suggestion": "DTL 产生年份不应晚于当前计算财年，请修正"
+    },
+    {
+      "code": "W012",
+      "severity": "warning",
+      "scope": "dtl_entry",
+      "field": "dtl_ledger",
+      "condition": "entry.amount < 0 或任一 reversal.amount < 0",
+      "message": "DTL 金额或回转金额为负",
+      "suggestion": "DTL 金额和回转金额应为非负，请修正"
+    },
+    {
+      "code": "W013",
+      "severity": "warning",
+      "scope": "dtl_entry",
+      "field": "dtl_ledger",
+      "condition": "同一辖区内存在 year/type/round(amount, 2) 完全相同的 DTL",
+      "message": "存在重复 DTL",
+      "suggestion": "同一辖区不应存在年份、类型、金额完全相同的重复 DTL，请合并或删除"
+    },
+  {
+    "code": "W014",
+    "severity": "warning",
+    "scope": "dtl_entry",
+    "field": "dtl_ledger",
+    "condition": "台账条目缺少 id、缺少或未知 type、qualified 非布尔",
+    "message": "DTL 台账条目关键字段缺失或取值非法",
+    "suggestion": "补齐 id / type / qualified（qualified 用 true|false）。缺 id 会使回转与判重失去锚点；type 不在规则库白名单内无法判断是否适用回转；qualified 非布尔则无法确定该递延税是否计入覆盖税额。type 允许规范类型（dtl_recapture.json:dtl_types）或中文别名（data_ingestion.json:dtl_type_from_chinese）"
+  },
+    {
+      "code": "I004",
+      "severity": "info",
+      "scope": "dtl_entry",
+      "field": "dtl_ledger",
+      "condition": "qualified DTL 已触发 Recapture，且 calc_year > entry.year + 5，且本年存在回转",
+      "message": "已触发 Recapture 的 DTL 本年登记回转，回转金额将加回 Covered Taxes",
+      "suggestion": "请核对回转金额与年份",
+      "params": {
+        "recapture_offset": 5
+      }
+    }
+  ]
+}

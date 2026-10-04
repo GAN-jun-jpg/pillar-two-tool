@@ -1,0 +1,192 @@
+{
+  "parser_version": "0.1.0",
+  "source_file": "financial_parser.py",
+  "sheet_type_identification": {
+    "method": "统计 Column A 中命中的 signature 关键词数量，最高者胜出",
+    "minimum_hit_count": 2,
+    "tie_rule": "若最高分并列，confidence 乘以 0.5",
+    "confidence_formula": "best_count / max(len(signature_keywords_of_best_type), 1)"
+  },
+  "statement_signatures": {
+    "profit_loss": [
+      "营业收入",
+      "营业总收入",
+      "营业利润",
+      "利润总额",
+      "净利润",
+      "营业成本",
+      "销售费用",
+      "管理费用",
+      "财务费用",
+      "所得税费用",
+      "税金及附加",
+      "投资收益",
+      "营业外收入",
+      "营业外支出",
+      "资产减值损失",
+      "信用减值损失"
+    ],
+    "balance_sheet": [
+      "固定资产",
+      "无形资产",
+      "使用权资产",
+      "货币资金",
+      "应收账款",
+      "存货",
+      "短期借款",
+      "长期借款",
+      "应付账款",
+      "资产总计",
+      "负债合计",
+      "所有者权益",
+      "流动资产合计",
+      "非流动资产合计",
+      "在建工程",
+      "递延所得税资产",
+      "递延所得税负债"
+    ],
+    "cash_flow": [
+      "经营活动产生的现金流量",
+      "投资活动产生的现金流量",
+      "筹资活动产生的现金流量",
+      "支付的各项税费",
+      "收到的税费返还",
+      "销售商品、提供劳务收到的现金",
+      "现金及现金等价物净增加额",
+      "期初现金及现金等价物余额",
+      "期末现金及现金等价物余额"
+    ]
+  },
+  "unit_detection": {
+    "wan_yuan_keywords": [
+      "万元",
+      "万元（",
+      "单位：万",
+      "金额单位：万"
+    ],
+    "scan_rows": 10,
+    "default_unit": "yuan",
+    "suffix_priority": "如果任意单元格出现带单位后缀的金额，则所有金额按后缀统一换算为万元，detected_unit 返回 wan_yuan"
+  },
+  "subject_matching": {
+    "priority": [
+      "exact",
+      "contains",
+      "fuzzy"
+    ],
+    "exact": "cell text 去空格后等于 keyword",
+    "contains": "keyword 是 cell text 的子串",
+    "fuzzy": "Jaccard 相似度 > 0.70，且长度比 >= 0.75",
+    "return_fields": [
+      "matched_amount",
+      "matched_subject_name",
+      "match_method"
+    ]
+  },
+  "profit_loss_subjects": {
+    "revenue": [
+      "营业总收入",
+      "营业收入",
+      "主营业务收入",
+      "销售收入"
+    ],
+    "cost": [
+      "营业总成本",
+      "营业成本",
+      "主营业务成本"
+    ],
+    "operating_profit": [
+      "营业利润",
+      "营业利润（亏损以\"-\"号填列）"
+    ],
+    "total_profit": [
+      "利润总额",
+      "税前利润",
+      "会计利润",
+      "利润总额（亏损总额以\"-\"号填列）"
+    ],
+    "income_tax_expense": [
+      "所得税费用",
+      "所得税",
+      "所得税费",
+      "所得税费用（收益以\"-\"号填列）"
+    ],
+    "deferred_tax_expense": [
+      "递延所得税费用",
+      "递延所得税费用（收益以\"-\"号填列）",
+      "其中：递延所得税费用"
+    ],
+    "net_profit": [
+      "净利润",
+      "净利润（净亏损以\"-\"号填列）"
+    ],
+    "payroll_in_pl": [
+      "应付职工薪酬",
+      "职工薪酬",
+      "工资福利",
+      "职工薪酬费用",
+      "员工薪酬",
+      "工资薪酬"
+    ]
+  },
+  "balance_sheet_subjects": {
+    "fixed_assets": [
+      "固定资产",
+      "固定资产原值",
+      "固定资产净值",
+      "固定资产账面价值",
+      "固定资产净额",
+      "固定资产合计"
+    ],
+    "right_of_use_assets": [
+      "使用权资产",
+      "使用权资产原值",
+      "使用权资产净额"
+    ],
+    "cip": [
+      "在建工程"
+    ],
+    "dtl": [
+      "递延所得税负债"
+    ],
+    "dta": [
+      "递延所得税资产"
+    ],
+    "total_assets": [
+      "资产总计",
+      "资产合计",
+      "总资产"
+    ],
+    "total_liabilities": [
+      "负债合计",
+      "负债总计",
+      "总负债"
+    ]
+  },
+  "cash_flow_subjects": {
+    "taxes_paid": [
+      "支付的各项税费",
+      "各项税费支出",
+      "实际缴纳的税费",
+      "已缴税费",
+      "支付的各项税费（含期初）"
+    ],
+    "cash_to_employees": [
+      "支付给职工以及为职工支付的现金",
+      "支付给职工和为职工支付的现金",
+      "职工薪酬支付的现金"
+    ],
+    "dta_decrease": [
+      "递延所得税资产减少"
+    ],
+    "dtl_increase": [
+      "递延所得税负债增加"
+    ]
+  },
+  "params": {
+    "min_signature_hits": 2,
+    "signature_tie_factor": 0.5,
+    "fuzzy_similarity_min": 0.7,
+    "fuzzy_length_ratio_min": 0.75
+  }
+}

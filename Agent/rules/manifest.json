@@ -1,0 +1,66 @@
+{
+  "rule_library_version": "0.1.0",
+  "generated_at": "2026-09-16",
+  "status": "extracted_and_consumed",
+  "source_application": "Pillar Two 全球最低税负计算工具",
+  "source_root": "D:\\德勤税务",
+  "source_files": [
+    "calculator.py",
+    "validator.py",
+    "globe_mapper.py",
+    "financial_parser.py",
+    "utils.py",
+    "unit_convert.py",
+    "exchange_rate.py"
+  ],
+  "rule_files": [
+    "tax_core.json",
+    "dtl_recapture.json",
+    "allocation.json",
+    "mapping_rules.json",
+    "validation_rules.json",
+    "parser_keywords.json",
+    "data_ingestion.json"
+  ],
+  "extraction_principles": [
+    "只提取现有代码中已经明确写死的规则，不新增未实现的税务判断",
+    "尽量保留原函数、原字段名、原阈值和原提示文案",
+    "规则已由运行时模块只读消费，但尚未实现规则变更自动生效和回滚",
+    "后续规则变更必须走版本化、回归测试和人工审批"
+  ],
+  "known_issues": [
+    "mapping_rules.json 已定义所得税费用到当期/递延的拆分，但后续仍需补充更多财报附注场景"
+  ],
+  "resolved_issues": [
+    "原 tax_paid 映射所得税费用、deferred_tax 另行取值导致重复计算的问题已解决",
+    "运行时字段 tax_paid 已统一重命名为 current_tax",
+    "globe_mapper.py 已实现 split:income_tax_expense-deferred_tax_expense 规则，并在映射末尾用最终 deferred_tax 校准 current_tax",
+    "W014（台账条目关键字段缺失或取值非法：id / type / qualified）已实现并在 validation_rules.json 声明；校验码「声明 ↔ 实现」由 test_rule_library.py 逐条锁定，不再出现只写在注释里的规则",
+    "规则变更的审批与生效日期机制已实现：新增 approved_at / effective_from / effective_to 字段（老库自动补列）、approve() 两步审批（草稿→批准，无审批人不得批准）、select_for(财年或日期) 按生效区间选取版本、activate_for() 自动切换并把旧 active 标记为 superseded；effective_to 含当日（财年 2025 = 2025-12-31），界面会提示当前财年的适用版本并在不一致时提供切换按钮"
+  ],
+  "consumers": {
+    "tax_core.json": [
+      "calculator.py"
+    ],
+    "dtl_recapture.json": [
+      "calculator.py"
+    ],
+    "allocation.json": [
+      "calculator.py"
+    ],
+    "mapping_rules.json": [
+      "globe_mapper.py"
+    ],
+    "validation_rules.json": [
+      "validator.py"
+    ],
+    "parser_keywords.json": [
+      "financial_parser.py"
+    ],
+    "data_ingestion.json": [
+      "unit_convert.py",
+      "exchange_rate.py",
+      "utils.py"
+    ]
+  }
+}
