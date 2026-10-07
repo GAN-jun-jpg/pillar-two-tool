@@ -17,7 +17,22 @@ QDMTT·IIR·UTPR 三层分配 → 结果审查 → 情景模拟（含架构调�
 | 浏览器 | Chrome / Edge / Firefox 任一现代浏览器 |
 | 网络 | **非必需**（不配 API Key 也能完整使用本地功能，见第 4 节） |
 
-## 2. 安装（通用步骤，三行命令）
+## 2. 获取代码
+
+二选一：
+
+```bash
+# 方式一：git 克隆（推荐，方便以后更新）
+git clone https://github.com/GAN-jun-jpg/pillar-two-tool.git
+cd pillar-two-tool
+
+# 方式二：不用 git —— 仓库页面点绿色 [Code] → Download ZIP，
+#         解压后进入该目录（.env.example 是隐藏文件，看不到也不影响运行）
+```
+
+**后面所有命令都要在这个目录里执行。**
+
+## 3. 安装（通用步骤）
 
 ```bash
 # ① 建虚拟环境（推荐，避免污染系统 Python）
@@ -31,14 +46,32 @@ python -m venv .venv
 #    macOS / Linux
 source .venv/bin/activate
 
-# ③ 装依赖
+# ③ 升级 pip（重要：Python 3.12 自带的 pip 过旧，装不了本项目锁定的版本）
+python -m pip install --upgrade pip
+
+# ④ 装依赖
 pip install -r requirements.txt
 ```
 
-> Windows 若提示"禁止运行脚本"，执行一次：
-> `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`（或改用 CMD 的 `activate.bat`）。
+> **国内网络建议加镜像**（本项目会拉 pandas / streamlit / pyarrow 等约 100 MB 的轮子，
+> 直连 PyPI 可能只有几十 kB/s）：
+> ```bash
+> pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
+> ```
+> 已装过一半中断了也没关系，重跑同一条命令会**续传**，不必删 venv 重来。
 
-## 3. 启动
+### 三个常见卡点（实测遇到过的）
+
+| 现象 | 原因与解决 |
+|---|---|
+| `python : 无法将"python"项识别为...` | `python` 不在 PATH。改用 `py -3.12 -m venv .venv`，或写全路径 `<Python安装目录>\python.exe` |
+| `.venv\Scripts\Activate.ps1 : 在此系统上禁止运行脚本` | 执行一次 `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`；或**不激活**，直接用 `.venv\Scripts\python.exe` 代替 `python` |
+| 装依赖报元数据/解析错误，或装完 `import pandas` 失败 | 第 ③ 步没做。先 `python -m pip install --upgrade pip` 再装 |
+
+> **不想激活虚拟环境也可以**：把命令里的 `python` 换成 `.venv\Scripts\python.exe`（Windows）
+> 或 `.venv/bin/python`（macOS/Linux）即可，效果一样。
+
+## 4. 启动
 
 ```bash
 streamlit run app.py
