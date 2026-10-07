@@ -16,7 +16,7 @@ _AUDIT_TMP = Path(tempfile.mkdtemp(prefix="pytest_audit_"))
 # 不要把「封版快照」里的测试也收集进来：那些是**当时那一套**文件的副本，
 # 被根目录一起收集会造成重复计数/版本混淆（快照应独立运行）。
 collect_ignore_glob = ["release/*", "Agent/*_tool_*/*", "Agent/_*/*",
-                       "Agent/pillar_two_*/*"]
+                       "Agent/pillar_two_*/*", "publish/*", "publish/**"]
 
 
 def pytest_configure(config):

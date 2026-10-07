@@ -128,15 +128,17 @@ cp .env.example .env && nano .env
 | ② 任意 OpenAI 兼容服务 | 自建网关 / 第三方服务商后台 |
 | ③ DeepSeek | platform.deepseek.com → API Keys → 创建 |
 
-`.env` 里**三选一**即可（推荐第一种）：
+`.env` 里**三选一**即可（推荐第一种）。**填了哪一组 key，就必须把 `LLM_DEFAULT_PROVIDER`
+改成对应的名字**（只认这三个值）：
 
-| 方式 | 需要的变量 | 说明 |
+| 方式 | 需要的变量 | `LLM_DEFAULT_PROVIDER` 填 |
 |---|---|---|
-| ① 通义千问 / DashScope（推荐） | `QWEN_API_KEY`（可选 `QWEN_MODEL`、`QWEN_BASE_URL`） | OpenAI 兼容接口 |
-| ② 任意 OpenAI 兼容服务 | `LLM_API_KEY` + `LLM_BASE_URL` + `LLM_MODEL_ID` | 自建/第三方网关 |
-| ③ DeepSeek | `DEEPSEEK_API_KEY`（可选 `DEEPSEEK_BASE_URL`、`DEEPSEEK_MODEL`） | 默认 provider |
+| ① 通义千问 / DashScope | `QWEN_API_KEY`（可选 `QWEN_MODEL`、`QWEN_BASE_URL`） | `dashscope` |
+| ② 任意 OpenAI 兼容服务 | `LLM_API_KEY` + `LLM_BASE_URL` + `LLM_MODEL_ID` | `openai_compatible` |
+| ③ DeepSeek（默认） | `DEEPSEEK_API_KEY`（可选 `DEEPSEEK_BASE_URL`、`DEEPSEEK_MODEL`） | `deepseek` |
 
-切换默认服务商：`LLM_DEFAULT_PROVIDER`（默认 `deepseek`）。
+> **不填 `LLM_DEFAULT_PROVIDER` 时默认用 `deepseek`** —— 也就是只填了千问的 key 却没改这一行，
+> 会提示"没有 deepseek 的密钥"（不会崩，只是回退本地流程）。
 **`.env` 已被 `.gitignore` 排除，永远不要提交。**
 
 ### 怎么确认配好了

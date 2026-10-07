@@ -33,9 +33,13 @@ DB_PATH = os.environ.get("PILLAR_TWO_DB") or os.path.join(
     os.path.dirname(__file__), "data", "pillar_two.db")  # 环境变量仅为测试隔离用
 storage = Storage(DB_PATH)
 
-# 云端模型供应商：具体模型名与地址来自 .env（DEEPSEEK_MODEL / DEEPSEEK_BASE_URL），
-# 界面的「模型与调用凭证」面板据此显示实际调用的模型。
-APP_LLM_PROVIDER = "deepseek"
+# 云端模型供应商：可用值必须与 llm_gateway 注册的名字一致 ——
+#   dashscope          （对应 QWEN_API_KEY，通义千问）
+#   openai_compatible  （对应 LLM_API_KEY + LLM_BASE_URL）
+#   deepseek           （对应 DEEPSEEK_API_KEY，默认）
+# 在 .env 里用 LLM_DEFAULT_PROVIDER 指定；不设置则默认 deepseek。
+# 界面的「模型与调用凭证」面板据此显示实际调用的模型与是否读到密钥。
+APP_LLM_PROVIDER = (os.environ.get("LLM_DEFAULT_PROVIDER") or "").strip() or "deepseek"
 
 # ── 规则库只读加载：只加载 / 校验，不参与计算，不影响现有结果 ──
 try:
