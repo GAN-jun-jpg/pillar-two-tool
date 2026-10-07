@@ -85,11 +85,48 @@ streamlit run app.py
 
 ## 4. 配置 API Key（可选）
 
-不配也能跑（见下表）。要启用云端 Agent，把示例文件复制成 `.env` 并填一组 Key：
+**不配也能用**（见本节末尾对照表）。要启用云端 Agent，二选一：
 
-```bash
-cp .env.example .env        # Windows: copy .env.example .env
+### 方式 A（最简单，适合先试）：启动前设环境变量
+
+在**同一个终端窗口**里先设变量、再启动（关掉窗口即失效）：
+
+```powershell
+# Windows (PowerShell)
+$env:QWEN_API_KEY = "sk-你的key"
+streamlit run app.py
 ```
+```bash
+# macOS / Linux
+export QWEN_API_KEY="sk-你的key"
+streamlit run app.py
+```
+
+### 方式 B（持久，推荐长期使用）：写进 `.env` 文件
+
+```powershell
+# Windows (PowerShell) —— 注意 .env.example 是隐藏文件，用命令行复制最省事
+Copy-Item .env.example .env
+notepad .env          # 填好你选的那组变量后保存
+```
+```cmd
+:: Windows (CMD)
+copy .env.example .env
+```
+```bash
+# macOS / Linux
+cp .env.example .env && nano .env
+```
+
+`.env` 与 `app.py` 放在**同一目录**（仓库根目录）即可，程序启动时会自动读取。
+
+### Key 从哪里来
+
+| 方式 | 去哪儿申请 |
+|---|---|
+| ① 通义千问 / DashScope（推荐，国内可直连） | 阿里云百炼控制台 → API-KEY 管理 → 创建 |
+| ② 任意 OpenAI 兼容服务 | 自建网关 / 第三方服务商后台 |
+| ③ DeepSeek | platform.deepseek.com → API Keys → 创建 |
 
 `.env` 里**三选一**即可（推荐第一种）：
 
@@ -101,6 +138,11 @@ cp .env.example .env        # Windows: copy .env.example .env
 
 切换默认服务商：`LLM_DEFAULT_PROVIDER`（默认 `deepseek`）。
 **`.env` 已被 `.gitignore` 排除，永远不要提交。**
+
+### 怎么确认配好了
+
+启动后打开「运行」页签：云端相关按钮/开关可用即成功；
+**若没配好，程序不会报错**，只是跳过云端解读与云端实验（本地计算、图表、报告全部照常）。
 
 ### 配置与不配置的区别
 
