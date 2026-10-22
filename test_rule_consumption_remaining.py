@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """剩余四个规则文件的只读接入回归测试。"""
 import calculator
 import exchange_rate
@@ -33,7 +33,8 @@ def test_dtl_recapture_rule_source():
     assert calculator.DTL_RULES_SOURCE == "rules_registry"
     assert calculator.RECAPTURE_OFFSET == 5
     assert calculator.EXPIRY_OFFSET == 4
-    assert len(calculator.DTL_TYPES) == 8
+    # 批次 8：补齐 Art 4.4.5 的 (b)(d)(e)(f)(g)(h)(i) 七类 → 8 + 7 = 15（原断言 8 为旧口径）
+    assert len(calculator.DTL_TYPES) == 15
 
 
 def test_allocation_rule_source():

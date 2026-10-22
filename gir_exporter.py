@@ -18,7 +18,7 @@ from openpyxl.utils import get_column_letter
 
 import plotly.io as pio
 
-from calculator import build_dtl_schedule, get_dtl_status, DTL_TYPES, get_sbie_rates, SIMPLIFIED_ETR_THRESHOLDS
+from calculator import build_dtl_schedule, get_dtl_status, DTL_TYPES, get_sbie_rates, SIMPLIFIED_ETR_THRESHOLDS, effective_reversed, effective_remaining
 
 # ═══════════════════════════════════════════════════════════
 # 样式常量
@@ -652,15 +652,22 @@ def _write_dtl(ws, rows: list[dict], calc_year: int) -> None:
 
         jur_start_rn = rn
         for entry in row.get("dtl_ledger", []):
-            dtl_id = entry.get("id", "")[:8]
-            year = entry.get("year", 2024)
-            amount = entry.get("amount", 0.0)
+            dtl_id = str(entry.get("id", ""))[:8]
+            # 空值容错：None/空串/非数值一律按 0 处理（此前 += None 会 TypeError ✗）
+            try:
+                year = int(float(entry.get("year")))
+            except (TypeError, ValueError):
+                year = "—"
+            try:
+                amount = float(entry.get("amount") or 0.0)
+            except (TypeError, ValueError):
+                amount = 0.0
             dtype = entry.get("type", "Other")
             qualified = "是" if entry.get("qualified", True) else "否"
 
-            reversals = entry.get("reversals", [])
-            reversed_total = sum(r.get("amount", 0.0) for r in reversals)
-            remaining = max(0.0, amount - reversed_total)
+            # 统一口径：只统计截至 calc_year 的回转（与引擎计提 / 状态 / 汇总一致 ✓）
+            reversed_total = effective_reversed(entry, calc_year)
+            remaining = effective_remaining(entry, calc_year)
 
             sts = get_dtl_status(entry, calc_year)
             status_label = sts["label"]
@@ -801,6 +808,14 @@ def _write_compliance_matrix(ws, results: list[dict], rows: list[dict]) -> None:
 # 主入口
 # ═══════════════════════════════════════════════════════════
 
+class GirExportError(ValueError):
+    """导出 GIR 所需的计算结果缺失或不可用。
+
+    典型场景：运行被数据校验阻断（`compute_pipeline` 返回 results=None）时误调导出 ✗。
+    此前会抛出 `TypeError: 'NoneType' object is not iterable`，难以定位 ✓。
+    """
+
+
 def export_gir(
     results: list[dict],
     rows: list[dict],
@@ -827,6 +842,17 @@ def export_gir(
     注意：Sheet 6 是分析性内容，**不参与任何计税**；所有金额仍由本地 calculator.py
     计算并落在 Sheet 1–5。
     """
+    # 明确报错，而不是在后面某行抛 TypeError（批次 5 项 5 ✓）
+    if not results:
+        raise GirExportError(
+            "无法导出 GIR：计算结果为空（results=None）。"
+            "通常是本次运行被数据校验阻断，请先修正「阻断」清单中的问题再重新运行。"
+        )
+    if not isinstance(allocation, dict) or "total_topup" not in allocation:
+        raise GirExportError(
+            "无法导出 GIR：分配结果不可用（allocation 缺少 total_topup）。请先完成一次成功计算。"
+        )
+
     wb = openpyxl.Workbook()
     wb.remove(wb.active)
 

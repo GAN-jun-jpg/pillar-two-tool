@@ -290,15 +290,15 @@
       "message": "存在重复 DTL",
       "suggestion": "同一辖区不应存在年份、类型、金额完全相同的重复 DTL，请合并或删除"
     },
-  {
-    "code": "W014",
-    "severity": "warning",
-    "scope": "dtl_entry",
-    "field": "dtl_ledger",
-    "condition": "台账条目缺少 id、缺少或未知 type、qualified 非布尔",
-    "message": "DTL 台账条目关键字段缺失或取值非法",
-    "suggestion": "补齐 id / type / qualified（qualified 用 true|false）。缺 id 会使回转与判重失去锚点；type 不在规则库白名单内无法判断是否适用回转；qualified 非布尔则无法确定该递延税是否计入覆盖税额。type 允许规范类型（dtl_recapture.json:dtl_types）或中文别名（data_ingestion.json:dtl_type_from_chinese）"
-  },
+    {
+      "code": "W014",
+      "severity": "warning",
+      "scope": "dtl_entry",
+      "field": "dtl_ledger",
+      "condition": "台账条目缺少 id、缺少或未知 type、qualified 非布尔",
+      "message": "DTL 台账条目关键字段缺失或取值非法",
+      "suggestion": "补齐 id / type / qualified（qualified 用 true|false）。缺 id 会使回转与判重失去锚点；type 不在规则库白名单内无法判断是否适用回转；qualified 非布尔则无法确定该递延税是否计入覆盖税额。type 允许规范类型（dtl_recapture.json:dtl_types）或中文别名（data_ingestion.json:dtl_type_from_chinese）"
+    },
     {
       "code": "I004",
       "severity": "info",
@@ -310,6 +310,69 @@
       "params": {
         "recapture_offset": 5
       }
+    },
+    {
+      "code": "E011",
+      "severity": "error",
+      "scope": "dtl_entry",
+      "field": "dtl_ledger[].amount",
+      "condition": "台账条目 amount < 0",
+      "message": "检测到负值 DTL，这属于递延所得税资产（DTA），请将其移至单独的 DTA 台账处理",
+      "suggestion": "DTA 与 DTL 的确认与回转逻辑不同，混记会使递延税调整与重获计算失真；请移出该条目后重新计算"
+    },
+    {
+      "code": "E012",
+      "severity": "error",
+      "scope": "dtl_entry",
+      "field": "dtl_ledger[].reversals",
+      "condition": "回转合计 > 产生金额 且 note/source 均为空",
+      "message": "回转合计超过产生金额，且台账未填写补充说明",
+      "suggestion": "这通常意味着录入错误或存在未记录的历史 DTL；请在台账该条目补充说明（note 或 source）后再继续计算"
+    },
+    {
+      "code": "E013",
+      "severity": "error",
+      "scope": "cross_jurisdiction",
+      "field": "name",
+      "condition": "存在同辖区名且关键数值全部相同的两行（profit / current_tax / deferred_tax / revenue / payroll / tangible_assets）",
+      "message": "检测到重复辖区行（数值完全相同），请确认后删除其中一行再计算",
+      "suggestion": "通常是重复粘贴或误录；请保留一行并删除另一行（与 DTL 台账层的 W013 不同，本条是辖区行层）"
+    },
+    {
+      "code": "W016",
+      "severity": "warning",
+      "scope": "dtl_entry",
+      "field": "dtl_ledger[].amount",
+      "condition": "台账条目 amount 缺失 / None / 空字符串 / 0",
+      "message": "DTL 产生金额空白或为零，无法确认该 DTL 是否真实存在",
+      "suggestion": "请确认：误填请修正金额；确实为零请从台账中移除该条目，以免干扰计算"
+    },
+    {
+      "code": "W017",
+      "severity": "warning",
+      "scope": "dtl_entry",
+      "field": "dtl_ledger[].year",
+      "condition": "触发年（产生年 + expiry_offset）已过，但该条目仍有未回转余额",
+      "message": "该 DTL 已过到期年度仍未完全回转，Recapture 可能已发生但未在台账中记录",
+      "suggestion": "请核对该笔是否已按第 4.4.4 条被重获：若已重获请在台账补记，若确实未回转请补录回转安排"
+    },
+    {
+      "code": "W018",
+      "severity": "warning",
+      "scope": "cross_jurisdiction",
+      "field": "statutory_rate",
+      "condition": "辖区行未填适用税率，或其值不在 [0, 1] 区间（负数 / > 100% / 非数字；0% 合法）",
+      "message": "未填适用税率，递延税未按最低税率重述，ETR 可能偏高",
+      "suggestion": "按第 4.4.1 条，递延税须以最低税率（15%）重述：系数 = min(1, 15% ÷ 适用税率)；当地适用税率高于 15% 时，递延税与当期回转须按比例折算后计入 Covered Taxes。请补充该辖区适用税率（百分数，如中国 25%）"
+    },
+    {
+      "code": "W019",
+      "severity": "warning",
+      "scope": "cross_jurisdiction",
+      "field": "currency",
+      "condition": "某辖区行的币种未在「币种汇率」中配置",
+      "message": "币种缺汇率，该行金额已按 1.0 折算，集团口径可能失真",
+      "suggestion": "请在侧边栏「币种汇率」补充该币种汇率后重新导入；导入层不再丢弃该行（此前会整行丢失），但按 1.0 折算意味着外币金额被当作人民币使用，集团总额与补税额会因此失真"
     }
   ]
 }

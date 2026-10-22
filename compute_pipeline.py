@@ -56,6 +56,7 @@ def compute(rows: list[dict], sbie_year: int,
             sbie_cf=r.get("sbie_cf", 0.0),
             ente=r.get("ente", False),
             ente_cf=r.get("ente_cf", 0.0),
+            statutory_rate=r.get("statutory_rate", 0.0),
         )
         for r in rows
     ]
@@ -63,11 +64,12 @@ def compute(rows: list[dict], sbie_year: int,
     parent_idx = {i: r.get("parent_idx") for i, r in enumerate(rows)}
     utpr_map = {i: r.get("utpr_applies", True) for i, r in enumerate(rows)}
     qdmtt_map = {i: r.get("qdmtt_applies", False) for i, r in enumerate(rows)}
+    iir_map = {i: r.get("iir_applies", True) for i, r in enumerate(rows)}
     ownership_map = {i: r.get("ownership", 1.0) for i, r in enumerate(rows)}
 
     allocation = run_allocation(results, parent_idx, utpr_map,
                                 qdmtt_applies=qdmtt_map, ownership=ownership_map,
-                                parent_shares=parent_shares)
+                                parent_shares=parent_shares, iir_applies=iir_map)
     tax_flow = compute_tax_flow(results, allocation, rows)
 
     return {

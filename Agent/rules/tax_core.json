@@ -34,11 +34,17 @@
     "current_tax_sign": "当期所得税允许为负数；负值按原值计入 Covered Taxes，后续由 ENTE 等规则处理"
   },
   "deferred_tax_cap": {
-    "condition": "deferred_tax > 0",
-    "cap": "0.15 * max(0, globe_profit)",
+    "condition": "deferred_adj > 0",
+    "cap": "deferred_cap_rate * max(0, globe_profit)",
     "rule": "正递延税超过上限时，只按上限计入 Covered Taxes",
     "article": "GloBE Art 4.4.3",
-    "negative_deferred": "负递延税为保守项，照常计入，不封顶"
+    "negative_deferred": "负递延税为保守项，照常计入，不封顶",
+    "deferred_cap_rate": 0.15,
+    "deferred_cap_base": "globe_profit",
+    "order": "先扣减台账当期实际回转（year == calc_year），再施加封顶；不得先封顶再减回转",
+    "current_year_reversal": "台账当期回转计入当期递延所得税（方案 §2 决策 1）",
+    "recast_at_minimum_rate": true,
+    "recast_rule": "Art 4.4.1：适用税率 > 15% 时，递延税相关金额按 min(1, 15%/适用税率) 重述"
   },
   "sbie": {
     "formula": "max(0, payroll) * payroll_rate + max(0, tangible_assets) * asset_rate",

@@ -37,6 +37,9 @@ def _impl(rows: list[dict], calc_year: int,
             sbie_cf=row.get("sbie_cf", 0.0),
             ente=row.get("ente", False),
             ente_cf=row.get("ente_cf", 0.0),
+            # 必须透传适用税率 ✓：否则递延税不会按最低税率重述（系数回落 1）
+            # → Agent 链路算出的 ETR 与 compute_pipeline 不一致 ✗
+            statutory_rate=row.get("statutory_rate"),
         )
         for row in rows
     ]
@@ -44,11 +47,13 @@ def _impl(rows: list[dict], calc_year: int,
     parent_idx = {i: row.get("parent_idx") for i, row in enumerate(rows)}
     utpr_map = {i: row.get("utpr_applies", True) for i, row in enumerate(rows)}
     qdmtt_map = {i: row.get("qdmtt_applies", False) for i, row in enumerate(rows)}
+    iir_map = {i: row.get("iir_applies", True) for i, row in enumerate(rows)}
     ownership_map = {i: row.get("ownership", 1.0) for i, row in enumerate(rows)}
 
     allocation = run_allocation(results, parent_idx, utpr_map,
                                 qdmtt_applies=qdmtt_map,
-                                ownership=ownership_map)
+                                ownership=ownership_map,
+                                iir_applies=iir_map)
     tax_flow = compute_tax_flow(results, allocation, rows)
 
     return {

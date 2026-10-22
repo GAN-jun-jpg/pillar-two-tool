@@ -7,12 +7,30 @@
     "R&D Capitalization",
     "Pension",
     "Goodwill",
-    "Other"
+    "Other",
+    "Government Licence",
+    "Decommissioning",
+    "Fair Value",
+    "FX Gain",
+    "Insurance Reserve",
+    "Reinvested Property",
+    "Accounting Change"
   ],
   "default_qualified": true,
-  "non_qualified_hint": {
-    "Pension": "养老金义务通常不触发 Recapture"
+  "non_qualified_hint": {},
+  "recapture_exempt_types": {
+    "R&D Capitalization": "4.4.5(c) 研发费用",
+    "Fixed Asset": "4.4.5(a) 有形资产成本回收扣除",
+    "Accelerated Depreciation": "4.4.5(a) 有形资产成本回收扣除",
+    "Government Licence": "4.4.5(b) 政府许可 / 不动产或自然资源开采（须含重大有形资产投资）",
+    "Decommissioning": "4.4.5(d) 退役与修复费用",
+    "Fair Value": "4.4.5(e) 未实现净收益的公允价值会计",
+    "FX Gain": "4.4.5(f) 汇兑净收益",
+    "Insurance Reserve": "4.4.5(g) 保险准备金与保单递延取得成本",
+    "Reinvested Property": "4.4.5(h) 同辖区有形资产处置并再投资于同辖区有形资产",
+    "Accounting Change": "4.4.5(i) 因会计政策变更就 (a)–(h) 类额外计提的金额"
   },
+  "recapture_exempt_note": "Art 4.4.5 的重获例外计提项不受 5 年重获约束（不进入 Recapture 基数）。依据：OECD《GloBE 示范规则》第 4.4.5 条（本地原文 raw/globe-pillar-two/2021-12-14-model-rules-ch04-computation-of-adjusted-covered-taxes.md L157-172）。未列入的类型（Lease / Inventory / Pension / Goodwill / Other 等）照常受重获约束 —— 尤其养老金不在 4.4.5 清单内。",
   "recapture": {
     "article": "GloBE Art 4.4.4",
     "scope": "只有 qualified DTL 受 Recapture 约束",

@@ -426,11 +426,26 @@ def check_dtl_near_expiry(rows: list[dict], calc_year: int) -> list[Finding]:
     findings = []
     for row in rows:
         for entry in row.get("dtl_ledger", []):
-            expiry = entry.get("year", 0) + 4
+            # 金额缺失 / 空白 / 非数值时不能计算剩余额 —— 这类条目由 W016 提示确认，
+            # 此处跳过即可（此前 `None - int` 会直接抛 TypeError 让整个校验中断 ✗）。
+            try:
+                amount = float(entry.get("amount") or 0)
+            except (TypeError, ValueError):
+                continue
+            try:
+                year = int(entry.get("year") or 0)
+            except (TypeError, ValueError):
+                continue
+            # 到期窗口长度取自规则库（calculator.EXPIRY_OFFSET，单一来源 ✓）
+            from calculator import EXPIRY_OFFSET
+
+            expiry = year + EXPIRY_OFFSET
             if not entry.get("qualified", True):
                 continue
-            reversed_total = sum(r.get("amount", 0) for r in entry.get("reversals", []))
-            remaining = entry.get("amount", 0) - reversed_total
+            # 统一口径：只统计截至 calc_year 的回转（与引擎 / 状态 / GIR 一致 ✓）
+            from calculator import effective_reversed
+            reversed_total = effective_reversed(entry, calc_year)
+            remaining = amount - reversed_total
             if remaining <= 0:
                 continue
             years_left = expiry - calc_year
@@ -443,6 +458,16 @@ def check_dtl_near_expiry(rows: list[dict], calc_year: int) -> list[Finding]:
                     f"DTL「{entry.get('id','?')[:8]}」{'已到期' if years_left <= 0 else f'还剩 {years_left} 年到期'}（{remaining:,.2f} 万未回转）",
                     "临近到期的 DTL 应及时安排回转，避免触发 Recapture 惩罚",
                     {"entry_id": entry.get("id"), "years_left": years_left, "remaining": remaining},
+                ))
+            elif years_left < 0:
+                # 触发年（到期年）已过、仍有未回转余额 → 必须提示（审计 C5：漏跑触发年会让惩罚凭空消失 ✗）
+                findings.append(Finding(
+                    "W017", Severity.WARNING, row.get("name"), "dtl_ledger",
+                    f"DTL「{_dtl_id8(entry)}」已于 {expiry} 年到期（{-years_left} 年前），"
+                    f"仍有 {remaining:,.2f} 万未回转 —— Recapture 可能已发生但未在台账中记录",
+                    "请核对该笔是否已按第 4.4.4 条被重获：若已重获请在台账补记，若确实未回转请补录回转安排",
+                    {"entry_id": entry.get("id"), "expiry_year": expiry,
+                     "years_left": years_left, "remaining": remaining},
                 ))
     return findings
 
@@ -507,6 +532,188 @@ def check_dtl_negative_amount(row, idx, entry):
                       "回转金额应为非负，请修正",
                       {"row": idx + 1, "entry_id": entry.get("id"), "reversal_amount": ra})
     return None
+
+
+def check_dtl_dta_block(row, idx, entry):
+    """E011 负值 DTL（本质为 DTA）→ 报错阻断（批次 1 新增）。
+
+    注意：这条只针对**台账条目金额为负**；辖区层的"负利润"是 GloBE 亏损，
+    属规则允许情形，由 W015/提示处理，绝不能在这里误判。
+    """
+    raw = entry.get("amount")
+    try:
+        amount = float(raw)
+    except (TypeError, ValueError):
+        return None
+    if amount < 0:
+        return _e(row, "E011", "dtl_ledger",
+                  "检测到负值 DTL，这属于递延所得税资产（DTA），"
+                  "请将其移至单独的 DTA 台账处理",
+                  "DTA 与 DTL 的确认与回转逻辑不同，混记会使递延税调整与重获计算失真；"
+                  "请移出该条目后重新计算",
+                  {"row": idx + 1, "entry_id": entry.get("id"), "amount": amount})
+    return None
+
+
+def _dtl_amount_blank(entry) -> bool:
+    """台账金额是否"空白"（缺失 / None / 空字符串）。0 属"零值"，单独判定。"""
+    if "amount" not in entry:
+        return True
+    raw = entry.get("amount")
+    if raw is None:
+        return True
+    return isinstance(raw, str) and raw.strip() == ""
+
+
+def check_dtl_blank_amount(row, idx, entry):
+    """W016 空白或零值 DTL → 警告 + 要求确认（批次 1 新增）。"""
+    raw = entry.get("amount")
+    blank = _dtl_amount_blank(entry)
+    zero = False
+    if not blank:
+        try:
+            zero = float(raw) == 0
+        except (TypeError, ValueError):
+            blank = True                      # 非数值也按"无法确认"处理
+    if not (blank or zero):
+        return None
+    label = "空白" if blank else "为零"
+    return _w(row, "W016", "dtl_ledger",
+              f"DTL「{_dtl_id8(entry)}」产生金额{label}，无法确认该 DTL 是否真实存在",
+              "请确认：误填请修正金额；确实为零请从台账中移除该条目，以免干扰计算",
+              {"row": idx + 1, "entry_id": entry.get("id"), "amount": raw,
+               "blank": blank, "zero": zero})
+
+
+def check_fx_rate_missing(rows: list[dict]) -> list[Finding]:
+    """W019 币种缺汇率 → 已按 1.0 折算（批次 11）。
+
+    导入层不再是"丢整行"✗，而是保留行 + 1.0 兜底 ✓ ；
+    本条把"按 1.0 折算过"这件事显性化，避免集团金额被静默扭曲 ✗。
+    """
+    out: list[Finding] = []
+    for row in rows or []:
+        missing = row.get("fx_rate_missing")
+        if not missing:
+            continue
+        out.append(_w(row, "W019", "currency",
+                      f"币种「{missing}」未配置汇率，该行金额已按 1.0 折算"
+                      "（集团口径可能失真）",
+                      "请在侧边栏「币种汇率」补充该币种汇率后重新导入；"
+                      "若刻意按 1.0 处理（如本币即为报告货币），可忽略本条",
+                      {"currency": missing}))
+    return out
+
+
+def check_dtl_over_reversal_needs_note(row, idx, entry):
+    """E012 超回转且无补充说明 → 报错阻断（批次 1 新增）。
+
+    W009 仍负责"超回转"的基础告警；本条是其升级：先补说明，才允许继续计算。
+    "说明"认 note 或 source 任一非空字段。
+    """
+    note = entry.get("note") or entry.get("source") or ""
+    if str(note).strip():
+        return None                            # 已有说明 → 交由 W009 仅告警
+    try:
+        amount = float(entry.get("amount"))
+    except (TypeError, ValueError):
+        return None
+    if amount < 0:
+        return None                            # 负数金额由 E011 处理
+    rev_total = 0.0
+    for rev in entry.get("reversals", []):
+        try:
+            rev_total += float(rev.get("amount", 0) or 0)
+        except (TypeError, ValueError):
+            continue
+    tolerance = 0.005
+    if rev_total > amount + tolerance:
+        label = (f"{row.get('name') or '?'}·{entry.get('year')}年·"
+                 f"{entry.get('type') or '?'}")
+        return _e(row, "E012", "dtl_ledger",
+                  f"DTL「{label}」（{_dtl_id8(entry)}）回转合计 {rev_total:,.2f} 万 "
+                  f"超过原值 {amount:,.2f} 万，且台账未填写补充说明",
+                  "这通常意味着录入错误或存在未记录的历史 DTL；"
+                  "请在台账该条目补充说明（note 或 source）后再继续计算",
+                  {"row": idx + 1, "entry_id": entry.get("id"),
+                   "amount": amount, "reversed_total": rev_total,
+                   "jurisdiction": row.get("name"), "year": entry.get("year"),
+                   "type": entry.get("type")})
+    return None
+
+
+def check_duplicate_jurisdiction_rows(rows: list[dict]) -> list[Finding]:
+    """E013 重复辖区行（同辖区 + 关键数值完全相同）→ 报错阻断（批次 1 新增）。
+
+    与 W013 的区别：W013 是**DTL 台账层**（同辖区同年同类型同金额）；
+    本条是**辖区行层**，故使用不同校验码。
+    """
+    key_fields = ("profit", "current_tax", "deferred_tax", "revenue",
+                  "payroll", "tangible_assets")
+
+    def signature(row: dict) -> tuple:
+        name = str(row.get("name") or "").strip()
+        values = []
+        for field in key_fields:
+            try:
+                values.append(round(float(row.get(field) or 0), 6))
+            except (TypeError, ValueError):
+                values.append(str(row.get(field)))
+        return (name, *values)
+
+    findings: list[Finding] = []
+    seen: dict[tuple, int] = {}
+    for idx, row in enumerate(rows):
+        sig = signature(row)
+        if sig[0] == "":
+            continue                            # 空名由 E001 处理
+        first = seen.get(sig)
+        if first is None:
+            seen[sig] = idx
+            continue
+        findings.append(_e(
+            row, "E013", "name",
+            f"检测到重复辖区行（数值完全相同），请确认后删除其中一行再计算："
+            f"「{sig[0]}」第 {first + 1} 行与第 {idx + 1} 行",
+            "两行关键数值（利润/已缴税/递延所得税/收入/薪酬/有形资产）完全一致，"
+            "通常是重复粘贴或误录；请保留一行并删除另一行",
+            {"row": idx + 1, "first_row": first + 1, "name": sig[0]}))
+    return findings
+
+
+def check_statutory_rate_missing(rows: list[dict]) -> list[Finding]:
+    """W018 未填/无效的适用税率（辖区行层）→ 只警告，不阻断（批次 8.1）。
+
+    Art 4.4.1 要求递延税按最低税率（15%）重述：``系数 = min(1, 15% ÷ 适用税率)``。
+    若 ``statutory_rate`` 缺失、为 0 或越界，重述系数退化为 1 → 递延税按全额计入
+    → Covered Taxes 偏高、ETR 偏高、补税偏低。故此处只做**警告**（不阻断计算）。
+    """
+    findings: list[Finding] = []
+    for row in rows:
+        if not str(row.get("name") or "").strip():
+            continue                            # 空名由 E001 处理
+        raw = row.get("statutory_rate")
+        try:
+            rate = float(raw) if raw not in (None, "") else None
+        except (TypeError, ValueError):
+            rate = None
+        if rate is not None and 0 <= rate <= 1:
+            continue                            # 合法范围 [0, 1]（0% 合法：开曼/百慕大/BVI 等）
+        if rate is None:
+            findings.append(_w(
+                row, "W018", "statutory_rate",
+                "未填适用税率，递延税未按最低税率重述，ETR 可能偏高；请补充该辖区适用税率",
+                "按第 4.4.1 条，递延税须以最低税率重述：系数 = min(1, 15% ÷ 适用税率)；"
+                "当地适用税率高于 15% 时，递延税与当期回转须按比例折算后计入 Covered Taxes",
+                {"statutory_rate": raw}))
+        else:
+            findings.append(_w(
+                row, "W018", "statutory_rate",
+                f"适用税率无效（{raw}），应为 0–100%（不含 0），递延税未重述，ETR 可能偏高",
+                "请输入该辖区法定/适用所得税税率（百分数，如中国 25%）；"
+                "按第 4.4.1 条以最低税率重述递延税：系数 = min(1, 15% ÷ 适用税率)",
+                {"statutory_rate": raw}))
+    return findings
 
 
 def _dtl_types() -> set[str]:
@@ -608,12 +815,15 @@ def check_dtl_recapture_with_reversal(row, idx, entry, calc_year):
 
 
 def check_dtl_ledger_quality(row, idx, calc_year):
-    """DTL 台账数据质量检查（W009-W014），返回所有命中。"""
+    """DTL 台账数据质量检查（W009-W014，含批次 1 新增 E011/E012/W016），返回所有命中。"""
     findings = []
     for entry in row.get("dtl_ledger", []):
         for fn in (check_dtl_reversal_overage,
                    check_dtl_backdated_reversal,
                    check_dtl_negative_amount,
+                   check_dtl_dta_block,                 # E011 负值 DTA 阻断
+                   check_dtl_blank_amount,              # W016 空白/零值确认
+                   check_dtl_over_reversal_needs_note,  # E012 超回转无说明阻断
                    check_dtl_entry_fields):
             f = fn(row, idx, entry)
             if f:
@@ -666,6 +876,9 @@ def validate(rows: list[dict], calc_year: int | None = None) -> ValidationReport
 
     # ── 跨辖区 ──
     report.extend(check_duplicate_names(rows))
+    report.extend(check_duplicate_jurisdiction_rows(rows))   # E013 重复辖区行（批次 1）
+    report.extend(check_statutory_rate_missing(rows))        # W018 未填/无效适用税率（批次 8.1）
+    report.extend(check_fx_rate_missing(rows))               # W019 缺汇率按 1.0 折算（批次 11）
     report.extend(check_parent_references(rows))
     report.extend(check_upe_exists(rows))
     report.extend(check_circular_ownership(rows))

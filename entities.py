@@ -51,6 +51,8 @@ def to_entity_rows(rows: list[dict]) -> list[dict]:
             "ownership": float(row.get("ownership", 1.0) or 1.0),
             **{field: row.get(field) for field in ENTITY_NUMERIC_FIELDS},
             **{field: bool(row.get(field)) for field in ENTITY_BOOL_FIELDS},
+            # 适用税率（批决 8 引入）：必须随实体往返透传，否则聚合后重述会退回系数 1
+            "statutory_rate": row.get("statutory_rate"),
             "dtl_ledger": [dict(entry) for entry in (row.get("dtl_ledger") or [])],
         })
     names = [str(row.get("name") or "").strip() for row in rows]
@@ -182,6 +184,27 @@ def aggregate_jurisdictions(entities: list[dict]) -> dict[str, Any]:
                 warnings.append(
                     f"辖区「{name}」内实体对 {field} 的设定不一致，已按「任一为真即适用」处理")
         row["dtl_ledger"] = [entry for entity in group for entry in entity["dtl_ledger"]]
+
+        # 适用税率（批决 8 / Art 4.4.1 重述）：同一辖区多个实体税率可能不同
+        # → 按「递延所得税金额绝对值」加权平均（递延税越大的实体，对辖区重述系数影响越大）。
+        #   · 全部实体都缺税率 → 保持 None（交由校验层 W018 提示，不在这里臆造 15% ✗）
+        #   · 有权重的实体都缺税率、但有部分实体填了 → 退化为已填值的简单平均（并留 warning）
+        weighted = [(rate, abs(float(entity.get("deferred_tax") or 0.0)))
+                    for entity in group
+                    for rate in [entity.get("statutory_rate")]
+                    if rate not in (None, "")]
+        nonzero = [(rate, weight) for rate, weight in weighted if weight > 0]
+        if nonzero:
+            total_weight = sum(weight for _, weight in nonzero)
+            row["statutory_rate"] = sum(float(rate) * weight
+                                        for rate, weight in nonzero) / total_weight
+        elif weighted:
+            row["statutory_rate"] = sum(float(rate) for rate, _ in weighted) / len(weighted)
+            if len(group) > 1:
+                warnings.append(
+                    f"辖区「{name}」各实体递延所得税均为 0，适用税率改按已填值的简单平均计算")
+        else:
+            row["statutory_rate"] = None
 
         # 归属：按实体持股把补税挂到各自母公司
         shares: dict[int, float] = {}

@@ -8,7 +8,8 @@
     "parent_idx": null,
     "ownership": 1.0,
     "qdmtt_applies": false,
-    "utpr_applies": true
+    "utpr_applies": true,
+    "iir_applies": true
   },
   "qdmtt": {
     "article": "GloBE Art 5.2 / Agreed Rule Order",
@@ -30,7 +31,8 @@
     "upe_rule": "parent_idx 为空视为 UPE；UPE 自身补税直接缴纳，不进入 UTPR 残池",
     "transparency": "offsets 明细逐条记录「上层应分担多少 / 被抵免多少 / 最终多少」，便于在界面与报告中展示多层链条",
     "official_vectors": "Example 2.3.2-1（B 收 10、A 应分担 6 被全额抵免）、Example 2.3.2-3（C 收 10、B 应分担 4 被抵免）——见 test_oecd_vectors.py",
-    "known_limits": "每辖区仅支持单一母公司，无法表达同一辖区被多个母公司分别持股的多路径结构（Example 2.3.2-2）；不建模各辖区是否已实施 IIR"
+    "known_limits": "每辖区仅支持单一母公司，无法表达同一辖区被多个母公司分别持股的多路径结构（Example 2.3.2-2）；不建模各辖区是否已实施 IIR",
+    "applies_switch": "iir_applies（辖区级，默认 true）：false 表示该辖区未实施 IIR → 不承担 IIR 上收，其份额留 residual → 进入 UTPR 残池；判定顺序：final<=0 → 10% 门槛 → iir_applies。缺字段按 true 处理（向后兼容）。总额不变、归属可变。"
   },
   "utpr": {
     "article": "GloBE Art 2.6",
@@ -59,7 +61,8 @@
       "utpr_recipients",
       "retention_rate",
       "export_rate",
-      "flows"
+      "flows",
+      "iir_not_applicable"
     ],
     "total_fields": [
       "total_topup_ex_na",

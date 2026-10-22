@@ -7,7 +7,8 @@ import uuid
 from calculator import (summarize, get_sbie_rates, build_dtl_schedule, get_dtl_status,
                         summarize_dtl, DTL_TYPES, NON_QUALIFIED_HINT, ownership_chain)
 from utils import (parse_csv, parse_excel, fmt_money, fmt_etr, parse_dtl_excel,
-                   build_scenario_excel, detect_unit)
+                   build_scenario_excel, detect_unit, carry_over_rates_and_ledger,
+                   apply_dtl_import)
 from visualizer import (build_sankey, build_etr_waterfall, build_etr_bar,
                         build_risk_matrix, build_topup_bridge,
                         build_attribution_bridge, topup_bridge_steps)
@@ -26,8 +27,10 @@ from analysis_report import (
     build_report_markdown, build_risk_chains, chain_markdown, markdown_to_docx,
 )
 
-from storage import Storage
+from storage import ScenarioNameExists, Storage
 from compute_pipeline import compute
+import snapshots
+import validation_explain
 
 DB_PATH = os.environ.get("PILLAR_TWO_DB") or os.path.join(
     os.path.dirname(__file__), "data", "pillar_two.db")  # 环境变量仅为测试隔离用
@@ -132,18 +135,117 @@ def _clear_data_widget_keys():
         del st.session_state[k]
 
 
-def _save_scenario():
-    """持久化当前 rows + UI 偏好。_just_loaded 期间跳过（避免加载态覆盖数据）。"""
+def _rows_digest() -> str:
+    """当前数据内容的稳定摘要（用于"内容无变化不写库"，缺陷 D4b）。"""
+    import hashlib
+    import json as _json
+
+    payload = {
+        "rows": st.session_state.rows,
+        "sbie_year": st.session_state.get("sbie_year", 2024),
+        "fs_upload_mode": st.session_state.get("fs_upload_mode", "separate"),
+    }
+    blob = _json.dumps(payload, sort_keys=True, ensure_ascii=False, default=str)
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()
+
+
+def _upload_signature(uploaded) -> str:
+    """上传文件的**内容**签名（同名文件改了内容也必须不同 ✓）。
+
+    此前导入逻辑只比文件名（`_last_upload != uploaded.name` ✗）→ 同名文件
+    改了内容再上传会被当成"没变化"而跳过解析（用户实测缺陷 D1 ✗）。
+    """
+    try:
+        raw = uploaded.getvalue()
+    except Exception:  # 极端情况下 UploadedFile 已被回收
+        raw = b""
+    if not isinstance(raw, (bytes, bytearray)):
+        raw = str(raw).encode("utf-8", "ignore")
+    return hashlib.sha256(bytes(raw)).hexdigest()
+
+
+def _enter_draft(source: str) -> None:
+    """进入草稿态：数据已变（导入 / 增删行），但尚未写入任何方案 ✓。
+
+    批次 13 · 根因：过去导入只替换内存 rows ✗，随后任何一次
+    `_save_scenario()` 都会把它写进"当前选中的方案"（默认方案A）✗
+    → 上传新数据就把方案A 覆盖掉 ✓（使用者反复遇到的事故 ✓）。
+    """
+    st.session_state["_draft_mode"] = True
+    st.session_state["_draft_source"] = source
+
+
+def _exit_draft() -> None:
+    """退出草稿态（显式保存成功后调用 ✓）。"""
+    st.session_state["_draft_mode"] = False
+    st.session_state.pop("_draft_source", None)
+
+
+def _save_scenario(explicit: bool = False):
+    """持久化当前 rows + UI 偏好。
+
+    缺陷 D4b：过去这里**每轮 rerun 都写库** ✗ —— 编辑一次、页面一刷新，
+    当前方案就被改写（"方案A 反复被覆盖"的真凶 ✗）。
+    现在三道理性闸门：
+      ① `_just_loaded` 期间跳过（加载态不覆盖）；
+      ② **锁定**（`_lock_scenario`）期间不写；
+      ③ **内容无变化不写**（比对摘要）。
+    真要写时走 `on_conflict="version"` → 覆盖前自动留旧版本快照 ✓。
+    """
     if st.session_state.get("_just_loaded"):
         return
-    storage.save(
-        name=st.session_state.get("_scenario_name", "默认方案"),
-        rows=st.session_state.rows,
-        sbie_year=st.session_state.get("sbie_year", 2024),
-        fs_upload_mode=st.session_state.get("fs_upload_mode", "separate"),
-        # 不知道单位时传 None（保留已登记的值），避免把别的会话登记的单位抹掉
-        unit=st.session_state.get("_data_unit") or None,
-    )
+    # 批次 13：草稿态下不自动写库 ✗ —— 导入/编辑后必须由用户显式保存，
+    # 否则会像过去那样把新数据写进"当前选中的方案"（默认方案A）✗
+    if st.session_state.get("_draft_mode") and not explicit:
+        st.session_state["_autosave_state"] = "draft"
+        return
+    if st.session_state.get("_lock_scenario"):
+        st.session_state["_autosave_state"] = "locked"
+        return
+    digest = _rows_digest()
+    if st.session_state.get("_autosave_digest") == digest:
+        return                                   # 内容无变化：不写库 ✓
+    name = st.session_state.get("_scenario_name", "默认方案")
+    try:
+        storage.save(
+            name=name,
+            rows=st.session_state.rows,
+            sbie_year=st.session_state.get("sbie_year", 2024),
+            fs_upload_mode=st.session_state.get("fs_upload_mode", "separate"),
+            # 不知道单位时传 None（保留已登记的值），避免把别的会话登记的单位抹掉
+            unit=st.session_state.get("_data_unit") or None,
+            on_conflict="version",               # 覆盖前自动留快照 ✓
+        )
+    except Exception as exc:                     # noqa: BLE001 - 自动保存失败不该炸页面
+        st.session_state["_autosave_state"] = f"error:{type(exc).__name__}"
+        return
+    import datetime as _dt
+
+    st.session_state["_autosave_digest"] = digest
+    st.session_state["_autosave_state"] = "saved"
+    st.session_state["_autosave_at"] = _dt.datetime.now().strftime("%H:%M:%S")
+    st.session_state["_autosave_name"] = name
+
+
+def _render_autosave_bar() -> None:
+    """锁定开关 + 自动保存提示（让用户知道库被谁、在何时改过）。"""
+    cols = st.columns([1, 3])
+    cols[0].checkbox(
+        "🔒 锁定当前方案（禁止自动写回）", key="_lock_scenario",
+        help="勾上后，编辑数据不会自动写回方案库；显式「保存」仍可用。"
+             "做演示或给别人看时建议勾上。")
+    state = st.session_state.get("_autosave_state")
+    name = (st.session_state.get("_autosave_name")
+            or st.session_state.get("_scenario_name", "默认方案"))
+    at = st.session_state.get("_autosave_at") or ""
+    if st.session_state.get("_lock_scenario"):
+        cols[1].caption("🔒 已锁定：改动**不会**自动保存（需要时请手动点保存）")
+    elif state == "saved" and at:
+        cols[1].caption(f"💾 已自动保存到方案「{name}」· {at}")
+    elif isinstance(state, str) and state.startswith("error"):
+        cols[1].caption(f"⚠️ 自动保存未成功（{state}）—— 改动仍在内存中，"
+                        "请手动保存或稍后重试")
+
 
 
 def _sync_dtl_widgets_to_entries():
@@ -205,9 +307,58 @@ def _dtl_from_widget_state(row: dict) -> dict:
             "amount": st.session_state.get(f"dtl_amount_{dtl_id}", entry.get("amount", 0.0)),
             "type": st.session_state.get(f"dtl_type_{dtl_id}", entry.get("type", "Other")),
             "qualified": st.session_state.get(f"dtl_qual_{dtl_id}", entry.get("qualified", True)),
+            # 批次 11.1：超回转的「补充说明」——有说明则只剩 W009，不再 E012 阻断 ✓
+            "note": st.session_state.get(f"dtl_note_{dtl_id}", entry.get("note")),
             "reversals": reversals,
         })
     return eff_row
+
+
+# 诊断留痕文件（可用环境变量覆盖，便于测试与多实例）：
+# 记录"本次实际传给计算管线的输入与结果"，用于排查
+# 「界面显示的 ETR ≠ 从库里直接算的 ETR」这类"app 内存 rows ≠ 库 rows"的问题。
+LAST_RUN_PATH = os.environ.get("PILLAR_TWO_LAST_RUN") or os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "data", "last_run.json")
+
+# 单行快照里要留痕的字段（只留排错需要的，避免文件过大）
+_LAST_RUN_ROW_KEYS = ("name", "profit", "current_tax", "deferred_tax", "revenue",
+                      "payroll", "tangible_assets", "statutory_rate")
+_LAST_RUN_RESULT_KEYS = ("deferred_tax_input", "deferred_tax", "recapture_amount",
+                         "recapture_credit", "covered_taxes", "etr", "sbie",
+                         "topup_tax")
+
+
+def _dump_last_run(rows: list[dict], sbie_year: int, payroll_rate: float,
+                   asset_rate: float, out: dict | None, error: str | None = None) -> None:
+    """把本次运行**实际使用的输入**与结果落盘到 ``LAST_RUN_PATH``（原子替换）。
+
+    只做诊断留痕，**不参与任何计算**；写盘失败一律静默忽略（不能因为写日志
+    把主流程搞坏）。成功与失败都写 ✓ —— 失败时的输入才是排错关键。
+    """
+    try:
+        payload = {
+            "at": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "scenario_name": st.session_state.get("current_name"),
+            "sbie_year": sbie_year,
+            "rates": {"payroll": payroll_rate, "asset": asset_rate},
+            "rows": [{k: r.get(k) for k in _LAST_RUN_ROW_KEYS}
+                     | {"dtl_ledger": r.get("dtl_ledger") or []}
+                     for r in rows],
+            "results": [],
+            "error": error,
+        }
+        # 结果按**下标**与行对齐（辖区名可能重复，不能按名字 join ✗）
+        for idx, res in enumerate((out or {}).get("results") or []):
+            item = {"name": (rows[idx].get("name") if idx < len(rows) else None)}
+            item.update({k: res.get(k) for k in _LAST_RUN_RESULT_KEYS})
+            payload["results"].append(item)
+        os.makedirs(os.path.dirname(LAST_RUN_PATH), exist_ok=True)
+        tmp_path = LAST_RUN_PATH + ".tmp"
+        with open(tmp_path, "w", encoding="utf-8") as fh:
+            json.dump(payload, fh, ensure_ascii=False, indent=2, default=str)
+        os.replace(tmp_path, LAST_RUN_PATH)
+    except Exception:
+        pass
 
 
 def _compute_all(rows: list[dict], sbie_year: int,
@@ -217,11 +368,19 @@ def _compute_all(rows: list[dict], sbie_year: int,
     实现在 `compute_pipeline.compute`，供界面与情景模拟引擎共用同一份管线
     （避免两处各自演化导致同一批数据算出两个结果）。
 
+    每次调用都会把"实际传入的输入 + 输出"写入 ``LAST_RUN_PATH``（诊断留痕 ✓）。
+
     Returns:
         {results, allocation, tax_flow, errors, validation_report}
     """
-    return compute(rows, sbie_year,
-                   payroll_rate=payroll_rate, asset_rate=asset_rate)
+    try:
+        out = compute(rows, sbie_year,
+                      payroll_rate=payroll_rate, asset_rate=asset_rate)
+    except Exception as exc:                      # 失败也要留痕（否则无从排查 ✗）
+        _dump_last_run(rows, sbie_year, payroll_rate, asset_rate, None, repr(exc))
+        raise
+    _dump_last_run(rows, sbie_year, payroll_rate, asset_rate, out)
+    return out
 
 
 def _apply_agent_state(state, source: str | None = None) -> None:
@@ -235,27 +394,285 @@ def _apply_agent_state(state, source: str | None = None) -> None:
     st.session_state._agent_state = state
     if source:
         st.session_state.result_source = source
+    # 校验报告要在"有没有结果"之前就存下来 ✗→✓：
+    # 运行失败（has_errors）时 results 为空，若按原来的位置写，失败原因会整份丢失，
+    # 界面上就只剩一句"数据校验存在阻断错误，流程已停止"（用户不知道哪里错、为什么、怎么改）。
+    _report = getattr(state, "validation_report", None)
+    if _report:
+        st.session_state.validation_report = _report
     results = getattr(state, "calculation_results", None)
     if not results:
+        # 失败也留痕 ✓ —— 被阻断时的输入才是排查"界面数与库数不一致"的关键 ✗
+        _dump_last_run(list(st.session_state.get("rows") or []),
+                       int(st.session_state.get("sbie_year") or 2024),
+                       *get_sbie_rates(int(st.session_state.get("sbie_year") or 2024)),
+                       None, "run_blocked_no_results")
         return
     st.session_state.results = results
     st.session_state.allocation = getattr(state, "allocation", None)
     st.session_state.tax_flow = getattr(state, "tax_flow", None)
-    st.session_state.validation_report = getattr(state, "validation_report", None)
     st.session_state._scroll_to_results = True
+    # 诊断留痕 ✓：Agent 链路不经过 `_compute_all` ✗，所以在这里也落一份
+    # （记录的是**本次运行真正使用的** session_state.rows 与结果）
+    _dump_last_run(list(st.session_state.get("rows") or []),
+                   int(st.session_state.get("sbie_year") or 2024),
+                   *get_sbie_rates(int(st.session_state.get("sbie_year") or 2024)),
+                   {"results": results})
     summary = summarize(results)
     audit("税负计算", "运行",
           f"{summary['total_jurisdictions']}辖区, "
           f"{summary['high_risk_count']}需补税, "
           f"补税{summary['total_topup_tax']:,.2f}万"
           f"（来源：{st.session_state.get('result_source', 'agent')}）")
+    _record_snapshot(results)
 
 
-def _render_validation_feedback() -> None:
-    """算前校验反馈：在结果区展示本轮运行的 validation_report。
+# ── 批次 4（B2）：年度快照 + 决策 2 回溯重述 ──
+def _scenario_name() -> str:
+    return st.session_state.get("_scenario_name", "默认方案")
 
-    Agent 流程写入的是 dict 形态（has_errors / summary / findings…），
-    这里按 severity 分组渲染，避免同一份数据在界面上出现两次。
+
+def _record_snapshot(results: list[dict]) -> None:
+    """计算成功后固化**本年度**快照（B2）。
+
+    同年度已有快照时**不覆盖**（与 D4 的 on_conflict 语义一致）；
+    任何失败都不打断主流程，只在结果区提示。
+    """
+    try:
+        year = int(st.session_state.get("sbie_year") or 2024)
+        rows = list(st.session_state.get("rows") or [])
+        payroll_rate, asset_rate = get_sbie_rates(year)
+        allocation = st.session_state.get("allocation") or {}
+        payload = snapshots.build_payload(
+            rows, year, payroll_rate, asset_rate, results,
+            allocation.get("total_topup"))
+        try:
+            path = snapshots.save_snapshot(_scenario_name(), year, payload)
+            st.session_state["_snapshot_state"] = f"已固化 {year} 年度快照"
+            st.session_state["_snapshot_path"] = str(path)
+        except snapshots.SnapshotExists:
+            st.session_state["_snapshot_state"] = (
+                f"{year} 年度快照已存在（未覆盖，保留首次结果）")
+    except Exception:                            # noqa: BLE001 - 快照失败不该炸页面
+        st.session_state["_snapshot_state"] = "快照未生成（内部错误）"
+
+
+def _render_snapshot_status() -> None:
+    text = st.session_state.get("_snapshot_state")
+    if text:
+        st.caption(f"🗂️ {text} · 方案「{_scenario_name()}」")
+
+
+def _render_last_run_snapshot() -> None:
+    """结果页折叠区：显示**本次运行实际使用的输入**（诊断用）。
+
+    当界面 ETR 与"从库里直接算"不一致时，打开这里就能看到
+    app 内存里真正传给计算管线的 rows（含适用税率 / 台账 / 递延税输入）。
+    """
+    if not os.path.exists(LAST_RUN_PATH):
+        return
+    with st.expander("🔍 本次运行输入快照（诊断用）", expanded=False):
+        try:
+            with open(LAST_RUN_PATH, encoding="utf-8") as fh:
+                snap = json.load(fh)
+        except Exception as exc:                 # noqa: BLE001 - 诊断区不该炸页面
+            st.caption(f"快照读取失败：{exc}")
+            return
+        st.caption(
+            "文件：" + LAST_RUN_PATH
+            + "　·　写入：" + str(snap.get("at"))
+            + "　·　方案：" + str(snap.get("scenario_name"))
+            + "　·　SBIE 年：" + str(snap.get("sbie_year"))
+            + "　·　错误：" + ("无" if not snap.get("error") else str(snap["error"])[:80])
+        )
+        snap_rows = snap.get("rows") or []
+        snap_res = snap.get("results") or []
+        table = []
+        for idx, row in enumerate(snap_rows):
+            res = snap_res[idx] if idx < len(snap_res) else {}
+            rate = row.get("statutory_rate")
+            etr = res.get("etr")
+            table.append({
+                "辖区": row.get("name"),
+                "利润": row.get("profit"),
+                "已缴税": row.get("current_tax"),
+                "递延税(输入)": row.get("deferred_tax"),
+                "适用税率": "未填" if rate is None else f"{float(rate):.2%}",
+                "递延税(调整后)": res.get("deferred_tax"),
+                "Covered": res.get("covered_taxes"),
+                "ETR": "—" if etr is None else f"{float(etr):.4%}",
+                "台账条数": len(row.get("dtl_ledger") or []),
+            })
+        if table:
+            st.dataframe(pd.DataFrame(table), hide_index=True,
+                         use_container_width=True)
+        else:
+            st.caption("（本次运行没有辖区数据）")
+
+
+def _render_backdated_restatement() -> None:
+    """决策 2：本年发生、但归属于更早年度的 DTL 回转 → 提示并展示**重述前后**对比。
+
+    只**展示**重述结果，不自动改写历史快照（由用户决定是否落库）。
+    """
+    rows = st.session_state.get("rows") or []
+    year = int(st.session_state.get("sbie_year") or 2024)
+    events = snapshots.detect_backdated_events(rows, year)
+    if not events:
+        return
+
+    name = _scenario_name()
+    targets = sorted({e["entry_year"] for e in events})
+    st.warning(
+        "⚠️ 本年度存在**归属更早年度**的 DTL 回转："
+        + "；".join(f"{e['jurisdiction']}（{e['entry_year']} 年产生，"
+                    f"{e['reversal_year']} 年回转 {e['amount']:,.2f}万）"
+                    for e in events[:4])
+        + (f" 等 {len(events)} 项" if len(events) > 4 else "")
+        + f" —— 按决策 2，这些事项应回溯调整 **{'、'.join(str(t) for t in targets)} 年度**的 ETR。"
+    )
+
+    table = []
+    for target in targets:
+        patch: dict[str, list[dict]] = {}
+        for event in events:
+            if event["entry_year"] == target:
+                patch.setdefault(event["jurisdiction"], []).append(event["entry"])
+        try:
+            result = snapshots.restate_year(name, target, patch)
+        except snapshots.SnapshotNotFound:
+            table.append({"受影响年度": target, "辖区": "—",
+                          "说明": "缺少该年度快照，无法回溯重述（请先在对应年度跑一次并保存）"})
+            continue
+        for jurisdiction, delta in (result["delta"]["jurisdictions"] or {}).items():
+            before = result["before"]["by_jurisdiction"].get(jurisdiction) or {}
+            after = result["after"]["by_jurisdiction"].get(jurisdiction) or {}
+            table.append({
+                "受影响年度": target,
+                "辖区": jurisdiction,
+                "重述前 ETR": before.get("etr"),
+                "重述后 ETR": after.get("etr"),
+                "ETR 变动": delta.get("etr"),
+                "重述前补税": before.get("topup_tax"),
+                "重述后补税": after.get("topup_tax"),
+            })
+    if table:
+        st.caption("重述前后对比（**不会**自动改写历史快照，仅供判断）：")
+        st.dataframe(pd.DataFrame(table), use_container_width=True, hide_index=True)
+
+
+def _severity_key(finding: dict) -> str:
+    """把 finding 的 severity 归一化为 error / warning / info（兼容枚举与字符串）。"""
+    raw = finding.get("severity")
+    text = str(getattr(raw, "value", raw) or "info").strip().lower()
+    if text in ("error", "e", "block", "blocking") or text.startswith("severity.error"):
+        return "error"
+    if text in ("warning", "w") or text.startswith("severity.warning"):
+        return "warning"
+    return "info"
+
+
+def _rows_validation_digest(rows: list[dict], calc_year) -> str:
+    """用"会影响校验结果"的字段生成摘要，用于判断是否需要重算校验。
+
+    只取关键数值与 DTL 台账结构，避免把 UI 上无关的字段算进来（否则每次输入都重算）。
+    """
+    import hashlib
+    import json as _json
+
+    payload = []
+    for row in rows:
+        payload.append({
+            "n": str(row.get("name") or ""),
+            "p": row.get("profit"), "t": row.get("current_tax"),
+            "d": row.get("deferred_tax"), "r": row.get("revenue"),
+            "w": row.get("payroll"), "a": row.get("tangible_assets"),
+            "own": row.get("ownership"), "parent": row.get("parent_idx"),
+            "q": bool(row.get("qdmtt_applies")), "u": bool(row.get("utpr_applies")),
+            "dtl": [
+                {k: str(e.get(k)) for k in ("id", "year", "amount", "type",
+                                            "qualified", "note", "source")}
+                | {"rev": [(str(r.get("year")), str(r.get("amount")))
+                           for r in (e.get("reversals") or [])]}
+                for e in (row.get("dtl_ledger") or [])
+            ],
+        })
+    raw = _json.dumps([payload, calc_year], sort_keys=True, ensure_ascii=False)
+    return hashlib.sha1(raw.encode("utf-8")).hexdigest()
+
+
+def _refresh_validation_report(force: bool = False) -> None:
+    """**只跑校验**（不跑完整计算），把结果写回 `validation_report`。
+
+    解决的问题（批次 1.2 · 问题 3）：编辑数据后 `results` 被清空 → 运行页签的阻断界面
+    随之消失，用户必须再点一次「▶ 运行」才看得到原因 ✗。现在改成：
+    数据一变就重算校验，`validation_report` 立即反映最新数据 ✓，不用点运行 ✓。
+
+    - 判定仍由 `validator.py` 决定 ✓（本函数只做"调用 + 转成界面用的 dict"）；
+    - 计算量极小（25 辖区 ≈ 毫秒级），因此可以放心在每次渲染前调用 ✓。
+    """
+    from validator import validate as _validate
+
+    rows = st.session_state.get("rows") or []
+    calc_year = st.session_state.get("sbie_year", 2024)
+    try:
+        digest = _rows_validation_digest(rows, calc_year)
+    except Exception:                      # noqa: BLE001 - 摘要失败不应阻断页面
+        digest = ""
+    if (not force
+            and digest
+            and st.session_state.get("_validation_digest") == digest
+            and st.session_state.get("validation_report")):
+        return
+    try:
+        report = _validate(rows, calc_year)
+        findings = [{
+            "code": f.code,
+            "severity": f.severity,
+            "jurisdiction": f.jurisdiction,
+            "field": f.field,
+            "message": f.message,
+            "suggestion": f.suggestion,
+            "detail": f.detail,
+        } for f in report.findings]
+        st.session_state.validation_report = {
+            "has_errors": report.has_errors,
+            "has_warnings": report.has_warnings,
+            "findings": findings,
+            "summary": (f"{len(report.errors)} 条阻断 · "
+                        f"{len(report.warnings)} 条警告 · "
+                        f"{len(report.infos)} 条提示"),
+            "source": "local_validate",
+        }
+        st.session_state["_validation_digest"] = digest
+    except Exception as exc:               # noqa: BLE001 - 校验异常不该让页面崩
+        st.session_state.validation_report = {
+            "has_errors": True,
+            "has_warnings": False,
+            "findings": [{
+                "code": "EX000", "severity": "error", "jurisdiction": None,
+                "field": "validate",
+                "message": f"本地校验执行失败：{type(exc).__name__}",
+                "suggestion": "请把该错误反馈给维护者（数据本身可能含无法解析的结构）",
+            }],
+            "summary": "校验执行失败",
+            "source": "local_validate",
+        }
+
+
+_SEVERITY_GROUPS = (("error", "🔴 阻断", "必须先修正，否则流程不会继续执行"),
+                    ("warning", "🟡 警告", "建议确认（不阻断计算）"),
+                    ("info", "🔵 提示", "参考信息，不影响判定"))
+
+
+def _render_validation_feedback(title: str = "") -> None:
+    """算前校验反馈：按**级别分成三段**渲染 findings 表格（哪里 / 为什么 / 怎么改）。
+
+    批次 1.2 · 问题 4：用户要求"分成三个列表：阻断-警告-提示" —— 全部混在一张表里
+    很难找 ✗。现在每段独立表头 + 独立条数，某段为空则整段不显示 ✓（不留空表 ✗）。
+
+    设计约束（方案 §4 C7 / 批次 1.1）：
+    - **判定仍由 `validator.py` 决定**，这里只呈现 ✓；不依赖 LLM，无 Key 同样可用 ✓。
     """
     report = st.session_state.get("validation_report")
     if not report:
@@ -263,35 +680,79 @@ def _render_validation_feedback() -> None:
     findings = report.get("findings") or []
     if not findings:
         return
+
     grouped: dict[str, list[dict]] = {"error": [], "warning": [], "info": []}
-    for f in findings:
-        grouped.setdefault(str(f.get("severity", "info")).lower(), []).append(f)
-    e_count = len(grouped.get("error", []))
-    w_count = len(grouped.get("warning", []))
-    i_count = len(grouped.get("info", []))
-    total_issues = e_count + w_count + i_count
-    if total_issues == 0:
+    for finding in findings:
+        grouped[_severity_key(finding)].append(finding)
+    counts = {key: len(items) for key, items in grouped.items()}
+
+    parts = [f"{icon} {counts[key]} 条" for key, icon, _desc in _SEVERITY_GROUPS
+             if counts[key]]
+    heading = title or "📋 数据质量反馈"
+    with st.expander(f"{heading} — 共 {len(findings)} 条（{' · '.join(parts)}）",
+                     expanded=counts["error"] > 0):
+        for key, icon, desc in _SEVERITY_GROUPS:
+            items = grouped[key]
+            if not items:
+                continue                       # 某段为空 → 整段不显示 ✓
+            st.markdown(f"**{icon}（{len(items)} 条）** —— {desc}")
+            table = [{
+                "校验码": finding.get("code") or "—",
+                "辖区": finding.get("jurisdiction") or "全局",
+                "位置": finding.get("field") or "—",
+                "问题": finding.get("message") or "",
+                "建议怎么做": finding.get("suggestion") or "—",
+            } for finding in items]
+            st.dataframe(pd.DataFrame(table), hide_index=True, width="stretch",
+                         key=f"validation_findings_{key}")
+            if key == "error":
+                st.error(f"🔴 {len(items)} 条**阻断**：必须先修正，否则流程不会继续执行。")
+            elif key == "warning":
+                st.warning(f"🟡 {len(items)} 条**警告**：建议确认（不阻断计算）。")
+        st.caption("👉 修正方法见上表「建议怎么做」列；改完自动重新校验，"
+                   "无需再点「▶ 运行」即可看到最新结果。")
+        _render_rule_basis(findings)
+
+
+def _render_rule_basis(findings: list[dict]) -> None:
+    """批次 6 · A2A 校验解释：把"规则依据 + 处置建议"附在阻断表下方 ✓。
+
+    - 判定仍由 validator 决定 ✗；这里只是解释 ✓。
+    - 无 Key / 解释失败 → **不显示或显示兜底** ✓，绝不阻塞用户 ✗。
+    - 结果按 findings 摘要缓存 ✓，避免每次 rerun 重复调用。
+    """
+    if not findings:
         return
-    parts = [p for p in [f"🔴 {e_count} 条阻断" if e_count else "",
-                         f"🟡 {w_count} 条警告" if w_count else "",
-                         f"🔵 {i_count} 条提示" if i_count else ""] if p]
-    with st.expander(f"📋 {total_issues} 条数据质量反馈 — {' · '.join(parts)}",
-                     expanded=(e_count > 0)):
-        for f in grouped.get("error", []):
-            loc = f"**{f.get('jurisdiction')}**" if f.get("jurisdiction") else "全局"
-            st.error(f"**{f.get('code')}** {loc} · {f.get('field') or '—'}\n\n{f.get('message')}")
-        for f in grouped.get("warning", []):
-            loc = f"**{f.get('jurisdiction')}**" if f.get("jurisdiction") else "全局"
-            st.warning(f"**{f.get('code')}** {loc} · {f.get('field') or '—'}\n\n"
-                       f"{f.get('message')}\n\n💡 {f.get('suggestion')}")
-        if i_count > 0:
-            info_lines = [
-                f"- **{f.get('code')}** {f.get('jurisdiction') or '全局'}：{f.get('message')}"
-                for f in grouped["info"][:10]
-            ]
-            if i_count > 10:
-                info_lines.append(f"- ... 还有 {i_count - 10} 条提示")
-            st.caption("\n".join(info_lines))
+    try:
+        digest = validation_explain.findings_digest(findings)
+        cache = st.session_state.get("rule_basis_cache") or {}
+        items = cache.get(digest)
+        if items is None:
+            items = validation_explain.explain_findings(findings)
+            cache[digest] = items
+            st.session_state.rule_basis_cache = cache
+            try:
+                audit("校验解释", "生成处置清单",
+                      f"{len(items)} 条 · 摘要 {digest[:8]}")
+            except Exception:
+                pass
+        if not items:
+            return
+        st.markdown("**🔎 规则依据与处置建议**")
+        table = [{
+            "校验码": item.get("code") or "—",
+            "辖区": item.get("jurisdiction") or "全局",
+            "问题": item.get("issue") or "",
+            "依据": item.get("basis") or "—",
+            "出处": item.get("citation") or "—",
+            "建议动作": item.get("action") or "—",
+        } for item in items]
+        st.dataframe(pd.DataFrame(table), hide_index=True, width="stretch",
+                     key="rule_basis_table")
+        st.caption("来源：Agent 解释（仅供理解，**判定以校验结果为准**）；"
+                   "无模型凭证时自动使用内置规则索引。")
+    except Exception as exc:                  # 失败即降级 ✓
+        st.caption(f"（规则依据暂不可用：{type(exc).__name__}；判定以校验结果为准）")
 
 
 @st.cache_data(show_spinner=False)
@@ -893,6 +1354,8 @@ if _run_clicked:
 
     if state.status == "failed":
         st.error("运行失败：" + ("；".join(state.errors) or "未知原因"))
+        # 批次 1.1：失败时也必须说清"哪里错 / 为什么 / 怎么改"（明细来自 validator，不依赖 LLM）
+        _render_validation_feedback("📋 阻断原因与修正建议")
     elif state.status == "waiting_human":
         st.warning("流程停在人工确认环节，请在「运行」页签处理后再继续。")
     elif st.session_state.get("results"):
@@ -909,6 +1372,10 @@ def _wk(name: str, i: int | None = None) -> str:
     """生成带数据版本号的 widget key，确保加载新数据时 widget 完全重建。"""
     v = st.session_state._data_version
     return f"v{v}_{name}_{i}" if i is not None else f"v{v}_{name}"
+
+
+# 哨兵：区分"从未同步过"与"同步过且值为 None" ✓（税率面板的影子键用）
+_UNSET = object()
 
 # ── 启动：从 SQLite 恢复上次会话（首次启动创建默认方案）──
 if "rows" not in st.session_state:
@@ -970,8 +1437,11 @@ def add_row():
     st.session_state._compare_results = None
     st.session_state.allocation = None
     st.session_state.tax_flow = None
+    _enter_draft("编辑")
     _save_scenario()
     audit("辖区数据", "添加辖区", f"当前共 {len(st.session_state.rows)} 个辖区")
+    # 批次 1.2 · 问题 3：编辑后立即重算校验，不必再点「▶ 运行」才看到阻断 ⬇
+    _refresh_validation_report(force=True)
 
 
 def delete_row(idx: int):
@@ -992,10 +1462,21 @@ def delete_row(idx: int):
                     row["parent_idx"] = None  # 母辖区被删了，重置为 UPE
                 elif p > idx:
                     row["parent_idx"] = p - 1   # 索引前移
+        # ★批次 1.2 · 问题 1 的根因修复★
+        # 行控件的 key 是 `f"v{_data_version}_{字段}_{行号}"`（见 `_wk()`）。
+        # 只 pop 数据、不换 key → 剩下那些"行号不变"的控件仍持有**上一轮**的值，
+        # 下一轮渲染又把这些旧值写回 rows → 内容整体前移、**最后一行被顶掉** ✗
+        # （现象正是用户报的"删中国大陆，结果日本没了、重复的中国大陆还在" ✗）。
+        # 递增 _data_version 会让所有行控件按新 key 重建，从而按 rows 的真实内容重新初始化 ✓。
+        st.session_state._data_version += 1
     else:
         st.session_state.rows[0] = {"name": "", "profit": 0.0, "current_tax": 0.0, "deferred_tax": 0.0, "revenue": 0.0, "payroll": 0.0, "tangible_assets": 0.0, "parent_idx": None, "ownership": 1.0, "qdmtt_applies": False, "utpr_applies": True, "globe_loss_election": False, "globe_loss_dta_balance": 0.0, "sbie_cf": 0.0, "ente": False, "ente_cf": 0.0, "dtl_ledger": []}
+        st.session_state._data_version += 1
+    _enter_draft("编辑")
     _save_scenario()
     audit("辖区数据", "删除辖区", target=name)
+    # 批次 1.2 · 问题 3：删除后立即重算校验（否则阻断界面会随结果一起消失 ✗）⬇
+    _refresh_validation_report(force=True)
 
 
 def clear_all():
@@ -1226,43 +1707,50 @@ def render_dtl_ledger():
         )
     with dtl_import_cols[1]:
         if st.button(" 导入台账", key="dtl_import_btn", width="stretch") and dtl_file is not None:
+            # 内容签名：同名文件改了内容必须能被识别（此前只看文件名 → 重传不生效 ✗）
+            _sig = _upload_signature(dtl_file)
             result = parse_dtl_excel(dtl_file)
             if result["errors"]:
                 for err in result["errors"]:
                     st.error(err)
             else:
                 dtl_data = result["dtl_by_jurisdiction"]
-                matched = 0
-                added = 0
-                for jur_name, ledger in dtl_data.items():
-                    # 按辖区名称匹配现有行
-                    found = False
-                    for row in st.session_state.rows:
-                        if row.get("name", "").strip() == jur_name:
-                            row["dtl_ledger"] = ledger
-                            matched += 1
-                            found = True
-                            break
-                    if not found:
-                        # 自动创建新区：只填名称 + DTL 台账，数值字段为 0
-                        st.session_state.rows.append({
-                            "name": jur_name,
-                            "profit": 0.0, "current_tax": 0.0, "deferred_tax": 0.0,
-                            "revenue": 0.0, "payroll": 0.0, "tangible_assets": 0.0,
-                            "parent_idx": None, "ownership": 1.0,
-                            "qdmtt_applies": False, "utpr_applies": True,
-                            "dtl_ledger": ledger,
-                        })
-                        added += 1
+                # 批次 11.1：DTL 表若带「适用税率」列 → 回填到对应辖区（辖区表/界面未填时 ✓）
+                dtl_rates = result.get("statutory_rate_by_jurisdiction") or {}
+                # 批次 14：替换 / 合并 —— 替换时**文件即全量**（不再继承旧台账 ✗）
+                _dtl_mode = st.radio(
+                    "导入方式",
+                    options=["替换（文件即全量 ✓）", "合并（保留文件中没有的辖区 ✓）"],
+                    index=0,
+                    horizontal=True,
+                    key="dtl_import_mode",
+                    help="替换：先把所有辖区台账清空，再按文件写入 —— "
+                         "可避免「文件里没有的辖区却显示旧 DTL」的问题。",
+                )
+                _mode = "merge" if _dtl_mode.startswith("合并") else "replace"
+                _, _stats = apply_dtl_import(
+                    st.session_state.rows, dtl_data, dtl_rates, mode=_mode)
+                matched = _stats["matched"]
+                added = _stats["added"]
+                rate_filled = _stats["rate_filled"]
+                if _stats["cleared"]:
+                    msg_clear = f"；已清空 {_stats['cleared']} 个辖区的旧台账"
+                else:
+                    msg_clear = ""
                 msg = f"已导入 {matched} 个辖区"
                 if added:
                     msg += f" + 新增 {added} 个辖区"
+                if rate_filled:
+                    msg += f"；并从 DTL 表回填 {rate_filled} 个辖区适用税率"
+                msg += f"（文件内容 {_sig[:8]}）"
                 st.success(msg)
-                # 清理上传标记，允许同名文件再次上传
-                st.session_state["_dtl_uploader_key"] = st.session_state.get("_dtl_uploader_key", 0) + 1
+                _enter_draft("上传导入")  # 批次 13：DTL 导入同样进草稿态 ✓
+                st.session_state._last_dtl_upload_sig = _sig
                 _save_scenario()
                 audit("DTL台账", "导入台账", msg)
                 st.session_state._just_loaded = True
+            # 无论成功/失败都换 key：否则同名文件（改了内容）会被 Streamlit 视为同一文件 ✗
+            st.session_state["_dtl_uploader_key"] = st.session_state.get("_dtl_uploader_key", 0) + 1
     with dtl_import_cols[2]:
         if has_any_dtl:
             st.caption("上传 Excel 自动匹配辖区并替换台账")
@@ -1343,6 +1831,26 @@ def render_dtl_ledger():
                               "type": w_dtype, "qualified": w_qualified,
                               "reversals": w_reversals}
                 sts = get_dtl_status(temp_entry, sbie_year)
+
+                # ── 批次 11.1：超回转 → 就地「补充说明」 ──
+                # 回转合计 > 产生额时，校验层会报 E012 阻断（决策 3 ② ✓）；
+                # 在这里填说明即可解开阻断（填后只剩 W009 警告 ✓）。
+                _rev_total = sum(float(r.get("amount") or 0.0) for r in w_reversals)
+                if _rev_total > float(w_amount or 0.0) + 1e-9:
+                    st.warning(
+                        f"⚠️ 回转合计 {_rev_total:,.2f} 万 超过产生额 {float(w_amount or 0.0):,.2f} 万"
+                        f"（超出 {_rev_total - float(w_amount or 0.0):,.2f} 万）。"
+                        "请在下方补充说明，否则运行会被阻断。"
+                    )
+                    _note_key = f"dtl_note_{dtl_id}"
+                    if _note_key not in st.session_state:      # 先注入已有说明，避免被空值覆盖 ✓
+                        st.session_state[_note_key] = entry.get("note") or ""
+                    st.text_input(
+                        "补充说明（超回转原因）",
+                        key=_note_key,
+                        placeholder="例如：原登记回转 3,500 超过原值 3,000，超出部分为误录",
+                        help="填写后该条不再阻断计算，仅保留警告；实际修正金额后请清空说明 ✓",
+                    )
 
                 dcols = st.columns([1.15, 1])
                 with dcols[0]:
@@ -1910,9 +2418,10 @@ with st.sidebar:
                 key=f"uploader_{st.session_state.get('_uploader_key', 0)}")
 
             if uploaded is not None:
-                # 仅当上传了新文件（文件名变化）时才重新解析
+                # 仅当上传了"新内容"时才重新解析（同名文件改了内容也必须重解析 ✓ → 用内容哈希）
                 current_file = getattr(uploaded, "name", "")
-                if st.session_state.get("_last_upload") != current_file:
+                current_sig = _upload_signature(uploaded)
+                if st.session_state.get("_last_upload") != current_sig:
                     fname = current_file.lower()
 
                     _imp_rates = {"CNY": 1.0}
@@ -1941,14 +2450,20 @@ with st.sidebar:
                             r.setdefault("revenue", 0.0)
                             r.setdefault("dtl_ledger", [])
                             r["dtl_ledger"] = r.get("dtl_ledger", [])
-                        st.session_state.rows = parsed["rows"]
+                        # 导入顺序无关（批次 11.4）：辖区表导入会整体替换 rows ✗，
+                        # 若用户「先导 DTL → 再导辖区表」，先前回填的适用税率与台账会被冲掉 ✗。
+                        # 逻辑抽到 utils.carry_over_rates_and_ledger（纯函数，可单测 ✓）
+                        _new_rows, _carried_rate, _carried_ledger = carry_over_rates_and_ledger(
+                            st.session_state.get("rows") or [], parsed["rows"])
+                        st.session_state.rows = _new_rows
+                        _enter_draft("上传导入")  # 批次 13：导入不写库 ✓
                         # 数据自己声明的金额单位（如「GloBE利润(万元)」）；情景模拟用它判断
                         # 要不要追问单位，避免十倍/百倍误差。
                         st.session_state._data_unit = str(parsed.get("unit") or "")
                         _migrate_dtl_ledger(st.session_state.rows)
                         st.session_state.results = None
                         st.session_state._compare_results = None
-                        st.session_state._last_upload = current_file
+                        st.session_state._last_upload = current_sig
                         # 汇总识别结果
                         qdmtt_names = [r["name"] for r in parsed["rows"] if r.get("qdmtt_applies")]
                         utpr_names = [r["name"] for r in parsed["rows"] if r.get("utpr_applies")]
@@ -1959,6 +2474,13 @@ with st.sidebar:
                             summary += f" | UTPR: {', '.join(utpr_names)}"
                         if parsed.get("dtl_count"):
                             summary += f" | DTL 台账 {parsed['dtl_count']} 条"
+                        if _carried_rate or _carried_ledger:
+                            _keep = []
+                            if _carried_rate:
+                                _keep.append(f"适用税率 {_carried_rate} 个")
+                            if _carried_ledger:
+                                _keep.append(f"DTL 台账 {_carried_ledger} 个")
+                            summary += f" | 沿用原有{'、'.join(_keep)}（导入顺序无关 ✓）"
                         st.success(summary)
                         _convs = parsed.get("conversions", [])
                         if _convs:
@@ -2106,15 +2628,59 @@ with st.sidebar:
             if snap and current_name != name:
                 storage.save(current_name, __import__("json").loads(snap),
                             st.session_state.get("_sbie_snapshot", st.session_state.get("sbie_year", 2024)),
-                            st.session_state.get("_fsmode_snapshot", st.session_state.get("fs_upload_mode", "separate")))
-            # 创建新方案（使用当前修改后的数据）
-            sid = storage.save(name, st.session_state.rows,
-                              st.session_state.get("sbie_year", 2024),
-                              st.session_state.get("fs_upload_mode", "separate"))
-            st.session_state._scenario_id = sid
-            st.session_state._scenario_name = name
-            audit("方案管理", "另存方案", target=name)
-            st.rerun()
+                            st.session_state.get("_fsmode_snapshot", st.session_state.get("fs_upload_mode", "separate")),
+                            on_conflict="overwrite")
+            # ★ 缺陷 D4：不再静默覆盖 —— 先按 "error" 尝试，撞名则交给下面的三选一
+            try:
+                sid = storage.save(name, st.session_state.rows,
+                                   st.session_state.get("sbie_year", 2024),
+                                   st.session_state.get("fs_upload_mode", "separate"),
+                                   on_conflict="error")
+            except ScenarioNameExists:
+                st.session_state["_save_conflict_name"] = name
+            else:
+                st.session_state._scenario_id = sid
+                st.session_state._scenario_name = name
+                _exit_draft()
+                audit("方案管理", "另存方案", target=name)
+                st.rerun()
+
+        # ── 同名冲突：覆盖 / 另存为 / 取消（默认不覆盖 ✗）──
+        conflict = st.session_state.get("_save_conflict_name")
+        if conflict:
+            st.warning(f"⚠️ 方案「**{conflict}**」已存在。请选择："
+                       "覆盖（会先自动留一份旧版本快照）/ 另存为新名字 / 取消")
+            conf_cols = st.columns(3)
+            if conf_cols[0].button("✅ 覆盖已有方案", key="save_conf_overwrite",
+                                   width="stretch"):
+                sid = storage.save(conflict, st.session_state.rows,
+                                   st.session_state.get("sbie_year", 2024),
+                                   st.session_state.get("fs_upload_mode", "separate"),
+                                   on_conflict="version")
+                st.session_state.pop("_save_conflict_name", None)
+                st.session_state._scenario_id = sid
+                st.session_state._scenario_name = conflict
+                _exit_draft()
+                audit("方案管理", "覆盖方案（已留快照）", target=conflict)
+                st.rerun()
+            if conf_cols[1].button("📄 另存为新名字", key="save_conf_new",
+                                   width="stretch"):
+                stamp = __import__("datetime").datetime.now().strftime("%Y%m%d_%H%M")
+                new_key = f"{conflict}_{stamp}"
+                sid = storage.save(new_key, st.session_state.rows,
+                                   st.session_state.get("sbie_year", 2024),
+                                   st.session_state.get("fs_upload_mode", "separate"),
+                                   on_conflict="error")
+                st.session_state.pop("_save_conflict_name", None)
+                st.session_state._scenario_id = sid
+                st.session_state._scenario_name = new_key
+                _exit_draft()
+                audit("方案管理", "另存方案（自动改名）", target=new_key)
+                st.rerun()
+            if conf_cols[2].button("✖ 取消", key="save_conf_cancel",
+                                   width="stretch"):
+                st.session_state.pop("_save_conflict_name", None)
+                st.rerun()
 
         scenarios = storage.list_all()
         if len(scenarios) > 1:
@@ -3662,6 +4228,8 @@ def render_agent_workflow():
         st.success("运行完成")
     elif state.status == "failed":
         st.error("运行失败")
+        # 批次 1.1：失败时展示阻断明细（哪里 / 为什么 / 怎么改）
+        _render_validation_feedback("📋 阻断原因与修正建议")
     else:
         st.info(f"当前状态：{state.status}")
 
@@ -6429,6 +6997,13 @@ def _render_risk_chains_and_report() -> None:
         st.markdown(report_md)
 
 
+_render_autosave_bar()
+if st.session_state.get("_draft_mode"):
+    st.warning(
+        "📝 当前为草稿（来源：" + str(st.session_state.get("_draft_source") or "编辑")
+        + "），**尚未写入任何方案**；点「💾 保存为方案」后可选择覆盖或另存 ✓"
+    )
+
 _main_tabs = st.tabs(["数据", "运行", "结果", "情景", "审计"])
 
 # ── Tab 1：▶ 运行（过程证据与人工审批）──
@@ -6439,6 +7014,61 @@ with _main_tabs[1]:
 with _main_tabs[0]:
     # 辖区数据录入
     st.subheader(" 辖区数据录入")
+
+    # ── 常驻：适用税率（Art 4.4.1 递延税重述依据）────────────────────────
+    # 使用者的反馈：原来的输入框藏在每个辖区卡片里，找不到 ✗；且"未填"显示成 0 ✗，
+    # 与"该辖区税率确实是 0%"混淆 ✗。这里改成**页首常驻、留空即未填** ✓。
+    with st.container(border=True):
+        st.markdown("**📌 适用税率（Art 4.4.1 · 递延税按最低税率重述的依据）**")
+        st.caption(
+            "重述系数 = min(1, **15% ÷ 适用税率**)：只有 **DTL 相关金额**（当期回转 / Recapture / 回加）按该系数重述；"
+            "辖区表的「递延所得税」本身不含 DTL，**不重述** ✓。"
+            "**留空 = 未填**（不重述 → ETR 偏高，会给 W018 警告）；填 **0** 表示该辖区税率确实为 0%（如开曼、BVI）。"
+        )
+        _rate_rows = st.session_state.rows
+        _filled = sum(1 for _r in _rate_rows if _r.get("statutory_rate") is not None)
+        st.caption(f"已填 **{_filled} / {len(_rate_rows)}** 个辖区")
+        _rate_cols = st.columns(min(4, max(1, len(_rate_rows))))
+        for _i, _row in enumerate(_rate_rows):
+            _v = _row.get("statutory_rate")
+            with _rate_cols[_i % len(_rate_cols)]:
+                _nm = str(_row.get("name", "")).strip() or f"辖区 {_i + 1}"
+                st.caption(f"{_nm}（%）" if _v is not None else f"{_nm}（%）⚠️ 未填")
+                _rate_key = _wk("statrate_top", _i)
+                _rate_target = None if _v is None else round(float(_v) * 100.0, 2)
+                # 批次 11.3：数据侧变了（DTL 导入回填 / 切换方案）→ 必须把 widget 状态同步过来 ✗→✓
+                # 否则 number_input 返回它自己的旧值（None），写回 rows 会把税率抹掉 ✗
+                # （与批次 1.2 的 `_data_version` 同类：widget 状态优先于数据模型 ✗）
+                # ⚠️ 但不能无条件"以数据为准"✗ —— 那样用户"清空输入框"会被立刻填回去 ✗。
+                # 用影子键记录"上次与数据同步时的值"：只有**数据侧确实变了**才覆盖 widget ✓。
+                _rate_seen_key = _rate_key + "_seen"
+                _rate_seen = st.session_state.get(_rate_seen_key, _UNSET)
+                if _rate_seen is _UNSET or _rate_target != _rate_seen:
+                    st.session_state[_rate_key] = _rate_target
+                st.session_state[_rate_seen_key] = _rate_target
+                _pct = st.number_input(
+                    "statrate_top", key=_rate_key,
+                    value=_rate_target,
+                    min_value=0.0, max_value=100.0, step=0.5, format="%.2f",
+                    label_visibility="collapsed", placeholder="未填",
+                )
+                st.session_state.rows[_i]["statutory_rate"] = (
+                    None if _pct is None else round(float(_pct) / 100.0, 6)
+                )
+        if _filled < len(_rate_rows):
+            st.caption("⚠️ 有辖区未填适用税率 → 这些辖区的 DTL 回转**不会重述**，ETR 会偏高 ✓")
+    # 批次 1.2 · 问题 3：先刷新一次校验（首次进页面 / 切换方案后也是最新的 ✓），
+    # 再用一条**横幅**把"有没有阻断"顶到最显眼的位置（表格在本页下方，含修正建议）✓。
+    _refresh_validation_report()
+    _banner_findings = (st.session_state.get("validation_report") or {}).get("findings") or []
+    _n_err = sum(1 for _f in _banner_findings if _severity_key(_f) == "error")
+    _n_warn = sum(1 for _f in _banner_findings if _severity_key(_f) == "warning")
+    if _n_err:
+        st.error(f"🔴 当前数据有 **{_n_err}** 条阻断、{_n_warn} 条警告 —— "
+                 "未修正前「▶ 运行」不会继续执行 ✗；修正办法见本页下方「📋 待修正项」")
+    elif _n_warn:
+        st.warning(f"🟡 当前数据有 {_n_warn} 条警告（不阻断计算）—— "
+                   "详见本页下方「📋 待修正项」")
     hide_label = {"label_visibility": "collapsed"}
     for i, row in enumerate(st.session_state.rows):
         _rname = row.get("name", "").strip() or f"辖区 {i+1}"
@@ -6491,7 +7121,7 @@ with _main_tabs[0]:
                     "assets", value=row.get("tangible_assets", 0.0), min_value=0.0,
                     step=100.0, format="%.2f", key=_wk("assets", i), **hide_label)
             # ── GloBE Loss Election（Art 4.5，once-and-for-all）──
-            f7, f8, f9 = st.columns(3)
+            f7, f8, f9, f10 = st.columns(4)
             with f7:
                 st.session_state.rows[i]["globe_loss_election"] = st.checkbox(
                     "GloBE Loss Election",
@@ -6511,6 +7141,18 @@ with _main_tabs[0]:
                     "sbiecf", value=row.get("sbie_cf", 0.0), min_value=0.0,
                     step=100.0, format="%.2f", key=_wk("sbiecf", i), **hide_label,
                     help="Art 5.3.4：以前年度未用尽的 SBIE 余额继续抵扣（有效期5年请自行管理）；上年计算追溯轨迹中「SBIE 未用结转」的年末结转填入下一年")
+            with f10:
+                st.caption("适用税率（%）· Art 4.4.1")
+                # 只读展示：编辑入口统一放在页首「📌 适用税率」，避免两处 widget 抢同一字段 ✗
+                _rv = row.get("statutory_rate")
+                if _rv is None:
+                    st.warning("未填 → 不重述", icon="⚠️")
+                    st.caption("在页首「📌 适用税率」里填")
+                else:
+                    _rvf = float(_rv)
+                    st.markdown(f"### {_rvf * 100.0:.2f}%")
+                    _coef = 1.0 if _rvf <= 0 else min(1.0, 0.15 / _rvf)   # 0.15 = 最低税率（Art 5.1）
+                    st.caption(f"重述系数 {_coef:.4f}")
             # ── 超额负税费用程序（ENTE，2024-06 行政指引）──
             f10, f11, f12 = st.columns(3)
             with f10:
@@ -6546,6 +7188,13 @@ with _main_tabs[0]:
             else:
                 st.caption("—")
             st.divider()
+
+    # ── 批次 1.2 · 问题 3：编辑后立刻校验（不等用户点「▶ 运行」）──────────────
+    # 辖区行与 DTL 台账的编辑都会写回 `st.session_state.rows`，这里在**本轮渲染之后**
+    # 重跑一次校验（只跑 validator，毫秒级），并把结果渲染出来 ——
+    # 于是"改完立刻能看到阻断原因"，不再出现"界面回退到计算前、要再点一次运行"✗。
+    _refresh_validation_report()
+    _render_validation_feedback("📋 待修正项（阻断会阻止运行）")
 
     st.button("＋ 添加辖区", on_click=add_row, type="secondary")
 
@@ -6600,6 +7249,13 @@ with _main_tabs[0]:
                 st.session_state.rows[i]["qdmtt_applies"] = st.checkbox(
                     "QDMTT", value=qdmtt, key=_wk("qdmtt", i),
                     help="合格境内最低补足税：自收，不参与 UTPR")
+                _iir_raw = row.get("iir_applies", True)
+                iir_on = st.checkbox(
+                    "IIR", value=(True if _iir_raw is None else bool(_iir_raw)),
+                    key=_wk("iir", i),
+                    help="该辖区是否已实施 IIR：关掉则它不上收补税，"
+                         "该部分转入 UTPR 残池（总额不变、归属改变）")
+                st.session_state.rows[i]["iir_applies"] = bool(iir_on)
             c4, c5 = st.columns([1, 3])
             with c4:
                 if qdmtt:
@@ -6751,7 +7407,24 @@ with _main_tabs[0]:
 
 # ── DTL 台账（原独立页签，并入「数据」页签末尾）──
 with _main_tabs[0]:
+    # DTL 重述依赖"适用税率"：这里**只读**回显（编辑入口在页首「📌 适用税率」✓，
+    # 两处都可编辑会互相覆盖 ✗）。使用者希望在 DTL 台账旁边也能看到这个关键参数 ✓。
+    _rate_chips = []
+    for _r in st.session_state.rows:
+        _n = str(_r.get("name", "")).strip() or "未命名"
+        _v2 = _r.get("statutory_rate")
+        if _v2 is None:
+            _rate_chips.append(f"{_n} ⚠️未填")
+        else:
+            _v2f = float(_v2)
+            _co = 1.0 if _v2f <= 0 else min(1.0, 0.15 / _v2f)
+            _rate_chips.append(f"{_n} {_v2f * 100:.2f}%（系数 {_co:.4f}）")
+    st.caption("📌 DTL 重述所用的适用税率（只读）：" + " · ".join(_rate_chips)
+               + " —— 修改请到页首「📌 适用税率」")
     render_dtl_ledger()
+    # 批次 1.2 · 问题 3：DTL 台账的增删改也在这里提交 → 立即重算校验，
+    # 使"下一次渲染"就带上最新 findings（用户不必再点「▶ 运行」✗）。
+    _refresh_validation_report()
 
 # ── Tab 2：📊 结果 ──
 with _main_tabs[2]:
@@ -6786,6 +7459,9 @@ with _main_tabs[2]:
             st.caption("本次结果来源：" + ("云端 Agent 流程" if _src == "agent" else "本地流程")
                        + "　·　" + str(len(results)) + " 个辖区")
         _render_validation_feedback()
+        _render_snapshot_status()
+        _render_backdated_restatement()
+        _render_last_run_snapshot()
     
         # ── Safe Harbour 汇总条 ──
         sh_count = summary.get("safe_harbour_count", 0)
@@ -7187,6 +7863,9 @@ with _main_tabs[2]:
                         flow_desc_parts = []
                         if es["iir_exported"] > 0:
                             flow_desc_parts.append(f"{fmt_money(es['iir_exported'])} 万元通过 IIR 流向 **{es['iir_to_name']}**")
+                        if es.get("iir_not_applicable", 0) > 0:
+                            flow_desc_parts.append(
+                                f"{fmt_money(es['iir_not_applicable'])} 万元因上层辖区未实施 IIR，改由 UTPR 分摊")
                         if es["utpr_exported"] > 0:
                             recip_names = "、".join(r["name"] for r in es["utpr_recipients"])
                             flow_desc_parts.append(f"{fmt_money(es['utpr_exported'])} 万元通过 UTPR 流向 **{recip_names}**")

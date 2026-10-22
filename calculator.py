@@ -2,6 +2,14 @@
 
 MIN_RATE = 0.15  # 全球最低税率 15%
 
+# 递延税封顶参数（决策 1：先扣减台账当期回转，再按此率封顶；均可由规则库覆盖）
+DEFERRED_CAP_RATE = 0.15      # 封顶率
+DEFERRED_CAP_BASE = "globe_profit"  # 封顶基数：globe_profit（默认）
+# 决策 1 开关：台账当期回转是否冲减当期递延所得税。
+# 用户已确认「辖区表递延所得税列 = 不含当年回转」→ **默认启用** ✓
+# （规则库 deferred_tax_cap.enable_current_year_reversal_adjustment 可覆盖，保留关闭能力 ✓）
+ENABLE_CURRENT_YEAR_REVERSAL_ADJUSTMENT = True
+
 # ═══════════════════════════════════════════════════════════════
 # Safe Harbour 安全港规则（OECD 过渡期 CbCR Safe Harbour）
 # ═══════════════════════════════════════════════════════════════
@@ -31,8 +39,10 @@ DTL_TYPES = [
     "Goodwill",
     "Other",
 ]
-# 不适用 Recapture 的 DTL 类型（如养老金义务通常非 qualified）
-NON_QUALIFIED_HINT = {"Pension": "养老金义务通常不触发 Recapture"}
+# 不适用 Recapture 的 DTL 类型提示（仅供界面说明；**判定以 recapture_exempt_types 为准**）
+# 2026-10-19 批次 7：删除原 `{"Pension": "养老金义务通常不触发 Recapture"}` ✗ ——
+# Art 4.4.5 的九项例外清单中并无养老金，该假设无规则依据（使用者已确认"养老金不可以豁免"）。
+NON_QUALIFIED_HINT = {}
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -44,6 +54,43 @@ RECAPTURE_OFFSET = 5
 EXPIRY_OFFSET = 4
 NEAR_EXPIRY_YEARS_LEFT_MAX = 1
 DTL_QUALIFIED_DEFAULT = True
+# Art 4.4.5 重获例外类型：类型 → 条款说明。**fallback 必须是空（= 不豁免）** ✗ ——
+# 若以"默认豁免"作为 fallback，规则库一旦丢失就会悄悄把重获算没 ✗。
+RECAPTURE_EXEMPT_TYPES: dict[str, str] = {}
+
+
+def recapture_exempt_article(entry: dict) -> str | None:
+    """该 DTL 是否属 Art 4.4.5 重获例外；是则返回条款说明，否则 None。
+
+    仅按类型判定（大小写与首尾空格不敏感 ✓）—— 台账里的 qualified 是**另一层**判断，
+    两者相互独立：qualified=False 表示不适用重获；本函数表示"属例外计提项"。
+    """
+    if not isinstance(entry, dict):
+        return None
+    dtype = str(entry.get("type") or "").strip()
+    if not dtype:
+        return None
+    for key, article in RECAPTURE_EXEMPT_TYPES.items():
+        if dtype.lower() == str(key).strip().lower():
+            return article or "Art 4.4.5"
+    return None
+
+
+# ── Art 4.4.1：递延税按最低税率重述（批次 8）────────────────────────────
+# 适用税率高于最低税率时，递延税相关金额须按「15% ÷ 适用税率」折算后计入 Covered Taxes。
+# 例：中国适用税率 25% → 系数 0.6 → 700 万回转只计 420 万。
+RECAST_AT_MINIMUM_RATE = True
+
+
+def recast_factor(statutory_rate) -> float:
+    """递延税重述系数 = min(1, 最低税率 / 适用税率)。
+
+    缺失 / 0 / 非数值 / 适用税率 ≤ 最低税率 → 1.0（**不放大** ✗）。
+    """
+    rate = _dtl_num(statutory_rate)
+    if rate <= 0 or rate <= MIN_RATE:
+        return 1.0
+    return MIN_RATE / rate
 
 
 def _read_dtl_recapture_rules() -> dict:
@@ -64,6 +111,10 @@ if _DTL_RECAPTURE_RULES:
     _loaded_non_qualified = _DTL_RECAPTURE_RULES.get("non_qualified_hint")
     if isinstance(_loaded_non_qualified, dict) and _loaded_non_qualified:
         NON_QUALIFIED_HINT = {str(k): str(v) for k, v in _loaded_non_qualified.items()}
+
+    _loaded_exempt = _DTL_RECAPTURE_RULES.get("recapture_exempt_types")
+    if isinstance(_loaded_exempt, dict) and _loaded_exempt:
+        RECAPTURE_EXEMPT_TYPES = {str(k): str(v) for k, v in _loaded_exempt.items()}
 
     _dtl_params = _DTL_RECAPTURE_RULES.get("params", {})
     if isinstance(_dtl_params, dict):
@@ -194,6 +245,9 @@ def _load_tax_core_rules() -> None:
     global _TAX_CORE_RULES, MIN_RATE, DE_MINIMIS_REVENUE, DE_MINIMIS_PROFIT
     global SIMPLIFIED_ETR_THRESHOLDS, SBIE_PAYROLL_RATES, SBIE_ASSET_RATES
     global PAYROLL_FLOOR, ASSET_FLOOR, RULES_SOURCE
+    global DEFERRED_CAP_RATE, DEFERRED_CAP_BASE
+    global ENABLE_CURRENT_YEAR_REVERSAL_ADJUSTMENT
+    global RECAST_AT_MINIMUM_RATE
 
     _TAX_CORE_RULES = _read_tax_core_rules()
     if not _TAX_CORE_RULES:
@@ -218,9 +272,22 @@ def _load_tax_core_rules() -> None:
         _steady_rate = _as_float(_sbie.get("steady_state_rate"), PAYROLL_FLOOR)
         PAYROLL_FLOOR = _steady_rate
         ASSET_FLOOR = _steady_rate
+    # 递延税封顶参数（决策 1）：可由 tax_core.json 的 deferred_tax_cap 覆盖
+    _deferred_cap = _TAX_CORE_RULES.get("deferred_tax_cap", {})
+    if isinstance(_deferred_cap, dict):
+        DEFERRED_CAP_RATE = _as_float(_deferred_cap.get("deferred_cap_rate"),
+                                      DEFERRED_CAP_RATE)
+        _base = str(_deferred_cap.get("deferred_cap_base") or "").strip()
+        if _base in ("globe_profit", "excess_profit"):
+            DEFERRED_CAP_BASE = _base
+        _switch = _deferred_cap.get("enable_current_year_reversal_adjustment")
+        if isinstance(_switch, bool):
+            ENABLE_CURRENT_YEAR_REVERSAL_ADJUSTMENT = _switch
+        # Art 4.4.1 重述开关（批次 8）：默认 True；显式 false 可关闭
+        _recast = _deferred_cap.get("recast_at_minimum_rate")
+        if isinstance(_recast, bool):
+            RECAST_AT_MINIMUM_RATE = _recast
     RULES_SOURCE = "rules_registry"
-
-
 def sync_rules() -> None:
     """规则库发布后按需重新读取常量。
 
@@ -334,6 +401,82 @@ def calc_topup_tax(excess_profit: float, etr: float | None) -> tuple[float | Non
     return topup_rate, topup_tax
 
 
+# ═══════════════════════════════════════════════════════════════
+# DTL 回转口径 —— **全项目唯一来源**
+# 背景（审计发现 B1/B3）：
+#   引擎计提用「reversal.year <= calc_year」，而 get_dtl_status / summarize_dtl /
+#   validator / gir_exporter 曾各自统计「全部回转」✗ → 同一笔 DTL 在不同界面显示
+#   不同的"已回转/剩余"，GIR 导出的 recapture_amt 与实际计入 Covered Taxes 的金额不符 ✗。
+#   B3：build_dtl_schedule 曾用 {year: amount} 字典 → 同年多笔回转被覆盖（30+20 只算 20）✗。
+# 现在所有调用方都走下面这几个函数，口径不可能再分叉 ✓。
+# ═══════════════════════════════════════════════════════════════
+def _dtl_num(value, default=0.0) -> float:
+    """安全取数：None / 空串 / 非数值 → default（空值不再让整份计算崩 ✗）。"""
+    if value is None or value == "":
+        return default
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def reversal_totals(entry: dict) -> dict[int, float]:
+    """按年份聚合回转金额 —— **同年多笔必须相加**（不能用 {year: amount} 覆盖 ✗）。
+
+    缺失/空白的年份或金额一律跳过（由 W016 提示用户确认 ✓）。
+    """
+    totals: dict[int, float] = {}
+    for record in entry.get("reversals") or []:
+        if not isinstance(record, dict):
+            continue
+        raw_year = record.get("year")
+        if raw_year is None or raw_year == "":
+            continue
+        try:
+            year = int(float(raw_year))
+        except (TypeError, ValueError):
+            continue
+        totals[year] = totals.get(year, 0.0) + _dtl_num(record.get("amount"))
+    return totals
+
+
+def effective_reversed(entry: dict, calc_year: int) -> float:
+    """**截至 calc_year（含当年）**已实际发生的回转合计 —— 唯一口径。
+
+    晚于 calc_year 登记的回转不计入（它们属于以后年度；触发年之后的回加由
+    calc_recapture_reversal_credit 处理 ✓）。
+    """
+    return sum(amount for year, amount in reversal_totals(entry).items()
+               if year <= int(calc_year))
+
+
+def effective_remaining(entry: dict, calc_year: int) -> float:
+    """按统一口径计算的剩余未回转金额（不会为负 ✓）。"""
+    return max(0.0, _dtl_num(entry.get("amount")) - effective_reversed(entry, calc_year))
+
+
+def current_year_reversed(entry: dict, calc_year: int) -> float:
+    """**恰好发生在 calc_year 这一财年**的回转合计（决策 1 专用口径）。
+
+    与 `effective_reversed` 的区别（两个口径**不能混用** ✗）：
+
+    | 函数 | 过滤 | 用途 |
+    |---|---|---|
+    | `effective_reversed` | `year <= calc_year` | **Recapture 基数**（Art 4.4.4：截至触发年已回转）|
+    | `current_year_reversed` | `year == calc_year` | **调整当期递延所得税**（方案 §2 决策 1 / §11.1）|
+
+    依据：台账里的回转本身就是"当期递延税费用变动"，应在**回转当年**冲减递延税费用；
+    而 Recapture 用的是"截至某年已回转总额"，两者用途不同 ✓。
+    """
+    return reversal_totals(entry).get(int(calc_year), 0.0)
+
+
+def current_year_reversed_total(dtl_ledger: list[dict], calc_year: int) -> float:
+    """台账内所有条目在 calc_year **当年**发生的实际回转合计（决策 1 用）。"""
+    return sum(current_year_reversed(entry, calc_year)
+               for entry in (dtl_ledger or []))
+
+
 def calc_recapture(dtl_ledger: list[dict], calc_year: int) -> tuple[float, list[dict]]:
     """计算 DTL 5 年回转惩罚（GloBE Article 4.4.4）。
 
@@ -365,22 +508,44 @@ def calc_recapture(dtl_ledger: list[dict], calc_year: int) -> tuple[float, list[
     recapture_total = 0.0
     expired = []
     for entry in dtl_ledger:
+        if not isinstance(entry, dict):
+            continue
         # 非 qualified DTL 不触发 Recapture
         if not entry.get("qualified", DTL_QUALIFIED_DEFAULT):
             continue
-        # 基数只统计截至计算年的回转；晚于触发年登记的回转由回加机制处理
-        total_reversed = sum(r["amount"] for r in entry.get("reversals", [])
-                             if r["year"] <= calc_year)
-        remaining = max(0.0, entry["amount"] - total_reversed)
-        if calc_year == entry["year"] + RECAPTURE_OFFSET and remaining > 0:
+        raw_year = entry.get("year")
+        try:
+            entry_year = int(float(raw_year))
+        except (TypeError, ValueError):
+            continue                      # 年份缺失/无效 → 跳过（W016/E005 已提示）
+        amount = _dtl_num(entry.get("amount"))
+        # 基数只统计截至计算年的回转（唯一口径 ✓）；晚于触发年登记的回转由回加机制处理
+        total_reversed = effective_reversed(entry, calc_year)
+        remaining = max(0.0, amount - total_reversed)
+        if calc_year == entry_year + RECAPTURE_OFFSET and remaining > 0:
+            exempt_article = recapture_exempt_article(entry)
+            if exempt_article:
+                # Art 4.4.5 重获例外：**不进入重获基数** ✗，仅记录供界面/trace 说明 ✓
+                expired.append({
+                    "year": entry_year,
+                    "amount": amount,
+                    "type": entry.get("type", "Other"),
+                    "total_reversed": total_reversed,
+                    "remaining": remaining,
+                    "expiry_year": entry_year + RECAPTURE_OFFSET,
+                    "exempt": True,
+                    "article": exempt_article,
+                })
+                continue
             recapture_total += remaining
             expired.append({
-                "year": entry["year"],
-                "amount": entry["amount"],
+                "year": entry_year,
+                "amount": amount,
                 "type": entry.get("type", "Other"),
                 "total_reversed": total_reversed,
                 "remaining": remaining,
-                "expiry_year": entry["year"] + RECAPTURE_OFFSET,
+                "expiry_year": entry_year + RECAPTURE_OFFSET,
+                "exempt": False,
             })
     return recapture_total, expired
 
@@ -400,19 +565,77 @@ def calc_recapture_reversal_credit(dtl_ledger: list[dict], calc_year: int) -> fl
     """
     credit = 0.0
     for entry in dtl_ledger:
+        if not isinstance(entry, dict):
+            continue
         if not entry.get("qualified", DTL_QUALIFIED_DEFAULT):
             continue
-        year = entry.get("year", 0)
+        # Art 4.4.5 重获例外：从未计提过 Recapture → 也就没有"回加"可言 ✓
+        if recapture_exempt_article(entry):
+            continue
+        try:
+            year = int(float(entry.get("year")))
+        except (TypeError, ValueError):
+            continue
         if calc_year <= year + RECAPTURE_OFFSET:
             continue
         # 触发年时点应有剩余，即该笔 DTL 确已触发过 Recapture
-        reversed_by_trigger = sum(r["amount"] for r in entry.get("reversals", [])
-                                  if r["year"] <= year + RECAPTURE_OFFSET)
-        if max(0.0, entry["amount"] - reversed_by_trigger) <= 0:
+        reversed_by_trigger = effective_reversed(entry, year + RECAPTURE_OFFSET)
+        recaptured_before = max(0.0, _dtl_num(entry.get("amount")) - reversed_by_trigger)
+        if recaptured_before <= 0:
             continue
-        credit += sum(r["amount"] for r in entry.get("reversals", [])
-                      if r["year"] == calc_year)
+        # 同年多笔回转必须全部加回（唯一口径 ✓）
+        current_rev = reversal_totals(entry).get(int(calc_year), 0.0)
+        # B 方案（启用决策 1 时生效）：只有「曾被重获的金额」才回加 ✓，
+        # 超出部分走决策 1 的递延税扣减 ✓ —— 同一笔回转只处理一次 ✗。
+        if ENABLE_CURRENT_YEAR_REVERSAL_ADJUSTMENT:
+            current_rev = min(current_rev, recaptured_before)
+        credit += current_rev
     return credit
+
+
+def current_year_reversal_c1_deduction(dtl_ledger: list[dict],
+                                       calc_year: int) -> float:
+    """决策 1（B 方案）的递延税扣减额 = 当期回转中**未被 Recapture 回加覆盖**的部分。
+
+    配平规则（同一笔回转只处理一次 ✗）：
+      - 曾被重获（产生年+5 时点仍有剩余）且已过触发年的部分 → 由
+        `calc_recapture_reversal_credit` 回加（+）；
+      - 其余部分 → 由本函数计入决策 1 的递延税扣减（−）。
+
+    仅当 `ENABLE_CURRENT_YEAR_REVERSAL_ADJUSTMENT = True` 时被
+    `assess_jurisdiction` 调用；开关关闭时返回 0（行为回到旧口径 ✓）。
+    """
+    total = 0.0
+    for entry in dtl_ledger or []:
+        if not isinstance(entry, dict):
+            continue
+        try:
+            year = int(float(entry.get("year")))
+        except (TypeError, ValueError):
+            continue
+        current_rev = reversal_totals(entry).get(int(calc_year), 0.0)
+        if current_rev == 0:
+            continue
+        trigger_year = year + RECAPTURE_OFFSET
+        is_exempt = recapture_exempt_article(entry) is not None
+        qualified = bool(entry.get("qualified", DTL_QUALIFIED_DEFAULT))
+        # 规则（2026-10 修正 ✗→✓）：
+        # ① 触发年**未到**（calc_year < 产生年+5）→ 这笔回转是正常的递延税变动 ✓
+        #    → **全额扣减**（曾误写成"窗口内一律抑制"✗ → 未到期回转被吞掉 → ETR 虚高 ✗）
+        # ② 触发年已到/已过，但**当时已无未回转余额**（例如已在窗口内全额回转 ✓）
+        #    → 实际未发生 Recapture ✓ → 也**全额扣减** ✓
+        # ③ 触发年已到/已过，且确有"曾被重获的金额" → 该部分由
+        #    `calc_recapture_reversal_credit` 回加（+）✓ → 本函数只扣**未被回加**的余额 ✓
+        #    （同一笔回转只处理一次 ✗）
+        if calc_year >= trigger_year and qualified and not is_exempt:
+            recaptured_before = max(
+                0.0, _dtl_num(entry.get("amount"))
+                - effective_reversed(entry, trigger_year))
+            eligible = min(current_rev, recaptured_before)
+            total += current_rev - eligible
+        else:
+            total += current_rev
+    return total
 
 
 def get_dtl_status(entry: dict, calc_year: int) -> dict:
@@ -428,9 +651,10 @@ def get_dtl_status(entry: dict, calc_year: int) -> dict:
             "expiry_year": int, # 到期年份
         }
     """
-    total_reversed = sum(r["amount"] for r in entry.get("reversals", []))
-    remaining = max(0.0, entry["amount"] - total_reversed)
-    expiry_year = entry["year"] + EXPIRY_OFFSET  # 5 年窗口的最后一年（含产生当年）
+    # 统一口径：只统计截至 calc_year 已实际发生的回转（与引擎计提一致 ✓）
+    total_reversed = effective_reversed(entry, calc_year)
+    remaining = max(0.0, _dtl_num(entry.get("amount")) - total_reversed)
+    expiry_year = int(_dtl_num(entry.get("year"))) + EXPIRY_OFFSET  # 5 年窗口的最后一年（含产生当年）
     years_left = expiry_year - calc_year
 
     if not entry.get("qualified", DTL_QUALIFIED_DEFAULT):
@@ -519,9 +743,12 @@ def summarize_dtl(rows: list[dict], calc_year: int) -> dict:
             continue
         jurisdictions.add(i)
         for entry in ledger:
+            if not isinstance(entry, dict):
+                continue
             total_count += 1
-            amount = entry.get("amount", 0.0)
-            reversed_amt = sum(r.get("amount", 0.0) for r in entry.get("reversals", []))
+            amount = _dtl_num(entry.get("amount"))
+            # 统一口径：只统计截至 calc_year 的回转（与状态/引擎/GIR 一致 ✓）
+            reversed_amt = effective_reversed(entry, calc_year)
             remaining = max(0.0, amount - reversed_amt)
 
             total_original += amount
@@ -554,10 +781,14 @@ def build_dtl_schedule(entry: dict, calc_year: int) -> list[dict]:
         [{year, change, balance, note, milestone}, ...] 从产生年到计算年
     """
     schedule = []
-    year = entry["year"]
-    amount = entry["amount"]
+    try:
+        year = int(float(entry.get("year")))
+    except (TypeError, ValueError):
+        return []                       # 年份缺失/无效 → 时间轴无意义，交给校验层提示
+    amount = _dtl_num(entry.get("amount"))
     is_qualified = entry.get("qualified", DTL_QUALIFIED_DEFAULT)
-    reversals = {r["year"]: r["amount"] for r in entry.get("reversals", [])}
+    # 统一口径：按年聚合（**同年多笔相加**，不再被字典覆盖 ✗）
+    reversals = reversal_totals(entry)
 
     balance = amount
     dtype = entry.get("type", "Other")
@@ -572,6 +803,8 @@ def build_dtl_schedule(entry: dict, calc_year: int) -> list[dict]:
     for y in range(year + 1, end_year + 1):
         rev = reversals.get(y, 0.0)
         balance -= rev
+        # 余额不得为负（超回转时截断到 0；超额本身由校验层 W009/E012 提示 ✓）
+        balance = max(0.0, balance)
         change = -rev if rev > 0 else 0
 
         if rev > 0:
@@ -678,7 +911,8 @@ def assess_jurisdiction(profit: float, current_tax: float,
                         globe_loss_dta_balance: float = 0.0,
                         sbie_cf: float = 0.0,
                         ente: bool = False,
-                        ente_cf: float = 0.0) -> dict:
+                        ente_cf: float = 0.0,
+                        statutory_rate: float = 0.0) -> dict:
     """对一个辖区做完整评估（含 Safe Harbour + SBIE + 递延税 + DTL回转 + GloBE Loss Election）。
 
     Args:
@@ -761,10 +995,12 @@ def assess_jurisdiction(profit: float, current_tax: float,
     ledger = dtl_ledger or []
     recapture_amount, recapture_detail = calc_recapture(ledger, calc_year)
     recapture_credit = calc_recapture_reversal_credit(ledger, calc_year)
+    triggered = [d for d in recapture_detail if not d.get("exempt")]
+    exempted = [d for d in recapture_detail if d.get("exempt")]
     if recapture_amount > 0:
         detail_list = "; ".join(
             f"{d['year']}年产生{d['amount']:,.0f}万(已回转{d['total_reversed']:,.0f}万,剩余{d['remaining']:,.0f}万)"
-            for d in recapture_detail
+            for d in triggered
         )
         traces.append({
             "step": "DTL 5年回转惩罚（触发年一次性）",
@@ -778,6 +1014,16 @@ def assess_jurisdiction(profit: float, current_tax: float,
             "article": "Art 4.4.4",
             "detail": f"{len(ledger)}笔DTL本年无 Recapture 触发（触发年 = 产生年+5）",
             "status": "applied",
+        })
+    if exempted:
+        traces.append({
+            "step": "DTL 重获例外（不参与 Recapture）",
+            "article": "Art 4.4.5",
+            "detail": "; ".join(
+                f"{d['year']}年产生{d['amount']:,.0f}万·{d.get('type')} 属 {d.get('article')}，"
+                f"剩余{d['remaining']:,.0f}万已豁免重获" for d in exempted
+            ),
+            "status": "exempt",
         })
     if recapture_credit > 0:
         traces.append({
@@ -811,27 +1057,64 @@ def assess_jurisdiction(profit: float, current_tax: float,
                 "status": "applied",
             })
 
-    # ── 递延税 15% 封顶（GloBE Art 4.4.3，简化口径）──
-    # 官方：递延税负债的抵免按最低税率封顶，防止高税率计提的 DTL 过度抵扣。
-    # 简化：正递延税（DTL 增加）计入上限 = 15% × max(GloBE 利润, 0)；
-    # 负递延税（DTA 增加，降低 ETR）为保守项，照常计入。
+    # ── 递延税：先扣减「台账当期实际回转」，**再**按 15% 封顶（方案 §2 决策 1 / §11.1）──
+    # 定稿公式：
+    #   当期实际回转   = Σ 条目.reversals[year == calc_year]   ← 注意是「==」，不是「<=」✗
+    #   deferred_adj   = 辖区表.递延所得税 − 当期实际回转
+    #   deferred_used  = min(deferred_adj, cap) if deferred_adj > 0 else deferred_adj（负数不封顶）
+    # 注：recapture_amount（减项）与 recapture_credit（加项）**已是独立项** ✓，此处不重复计入 ✗。
     deferred_input = deferred_tax
-    deferred_used = deferred_tax
-    if deferred_tax > 0:
-        dtl_cap = MIN_RATE * max(0.0, profit)
-        if deferred_tax > dtl_cap:
+    reversal_now = (current_year_reversal_c1_deduction(ledger, calc_year)
+                    if ENABLE_CURRENT_YEAR_REVERSAL_ADJUSTMENT else 0.0)
+    # ── Art 4.4.1：DTL 相关金额按最低税率重述（批次 8 / 批次 10 收窄范围）──
+    # 重要口径（使用者 2026-10-19 确认）：辖区表「递延所得税」列**本身不含 DTL** ✓
+    #   ⇒ **该列不重述**（原值计入）✗
+    #   ⇒ 只对 **DTL 相关腿**（当期回转 / Recapture / 回加）按 min(1, 15%/适用税率) 折算 ✓
+    # 顺序：先重述 DTL 腿 → 再求和（递延税原值 − 回转 + recapture + credit）→ 最后 15% 封顶。
+    rate_factor = recast_factor(statutory_rate) if RECAST_AT_MINIMUM_RATE else 1.0
+    deferred_recast = deferred_tax          # 不重述 ✓（该列不含 DTL）
+    reversal_now_recast = reversal_now * rate_factor
+    if rate_factor < 1.0:
+        traces.append({
+            "step": "DTL 回转按最低税率重述",
+            "article": "Art 4.4.1",
+            "detail": (f"适用税率 {_dtl_num(statutory_rate):.2%} > 15%，重述系数 "
+                       f"{rate_factor:.4f}：当期回转 {reversal_now:,.0f}万 → "
+                       f"{reversal_now_recast:,.0f}万（辖区表递延税 {deferred_tax:,.0f}万 "
+                       f"不含 DTL，不重述 ✓）"),
+            "status": "applied",
+        })
+    deferred_adj = deferred_recast - reversal_now_recast
+    if reversal_now:
+        traces.append({
+            "step": "台账当期回转调整递延税",
+            "article": "Art 4.4（台账回转即当期递延税费用变动）",
+            "detail": (f"辖区表递延税 {deferred_recast:,.0f}万 − 台账 {int(calc_year)} 年"
+                       f"实际回转 {reversal_now_recast:,.0f}万 = {deferred_adj:,.0f}万"),
+            "status": "applied",
+        })
+    deferred_used = deferred_adj
+    if deferred_adj > 0:
+        dtl_cap = DEFERRED_CAP_RATE * max(0.0, profit)
+        if deferred_adj > dtl_cap:
             deferred_used = dtl_cap
             traces.append({
                 "step": "递延税 15% 封顶",
                 "article": "Art 4.4.3",
-                "detail": (f"递延税费用 {deferred_tax:,.0f}万 超过 {MIN_RATE:.0%}×GloBE利润 {dtl_cap:,.0f}万，"
+                "detail": (f"调整后递延税 {deferred_adj:,.0f}万 超过 "
+                           f"{DEFERRED_CAP_RATE:.0%}×GloBE利润 {dtl_cap:,.0f}万，"
                            f"按封顶额 {deferred_used:,.0f}万 计入 Covered Taxes"),
                 "status": "applied",
             })
 
     # GloBE Covered Taxes = 当期所得税 + 递延所得税费用(封顶后) − DTL 回转惩罚
     #                     + GloBE Loss DTA 本年释放 + Recapture 后回转回加（如有）
-    covered_taxes = current_tax + deferred_used - recapture_amount + gle["dta_used"] + recapture_credit
+    # 注：Recapture 与回加也属 DTL 腿 → 按 Art 4.4.1 的重述系数折算（批次 8/10）✓
+    #     辖区表递延税（deferred_recast）**不重述** ✗ —— 该列本身不含 DTL ✓
+    covered_taxes = (current_tax + deferred_used
+                     - recapture_amount * rate_factor
+                     + gle["dta_used"]
+                     + recapture_credit * rate_factor)
 
     # ── 超额负税费用程序（ENTE，Art 5.2.1，2024-06 行政指引）──
     # 负税费用年度（Adjusted Covered Taxes < 0）：移除负额归零，负额转存 ENTE 结转；
@@ -997,7 +1280,10 @@ def assess_jurisdiction(profit: float, current_tax: float,
         "current_tax": current_tax,
         "deferred_tax": deferred_used,
         "deferred_tax_input": deferred_input,
+        "statutory_rate": round(_dtl_num(statutory_rate), 6),
+        "recast_factor": round(rate_factor, 6),
         "recapture_amount": recapture_amount,
+        "recapture_amount_applied": round(recapture_amount * rate_factor, 2),
         "recapture_credit": recapture_credit,
         "recapture_detail": recapture_detail,
         "globe_loss_dta": gle,
@@ -1101,7 +1387,9 @@ def _allocate_iir_multi_parent(child: int, topup: float,
                                below_threshold: dict[int, float],
                                parent_idx: dict[int, int | None],
                                own: dict[int, float],
-                               count: int) -> float:
+                               count: int,
+                               iir_map: dict[int, bool] | None = None,
+                               not_applicable: dict[int, float] | None = None) -> float:
     """多母公司分支：同一辖区内多个实体分属不同母公司时，按持股比例拆分补税。
 
     与单链路径一致的两条规则：
@@ -1117,6 +1405,11 @@ def _allocate_iir_multi_parent(child: int, topup: float,
     included_total = 0.0
     collected_below = 0.0          # 本层已实际征收的合计（供上层抵免）
     collected_paths: list[tuple[int, float]] = []   # (直接母公司, 该路径已征收额)
+    _map = iir_map or {}
+    _na = not_applicable if not_applicable is not None else {}
+
+    def _iir_on(idx: int) -> bool:
+        return bool(_map.get(idx, True))
 
     for parent in sorted(shares):
         share = float(shares[parent])
@@ -1132,6 +1425,17 @@ def _allocate_iir_multi_parent(child: int, topup: float,
                 "reason": f"多母公司结构：该母公司持股 {share:.2%} 未达 {threshold:.0%} "
                           "门槛，不适用 IIR → 转入 UTPR 残池",
                 "multi_parent": True,
+            })
+            collected_paths.append((parent, 0.0))
+            continue
+        if not _iir_on(parent):
+            # 该母公司未实施 IIR → 不上收，份额留残池（不递增 collected_below，避免上层误抵免）
+            _na[parent] = _alloc_round(_na.get(parent, 0.0) + allocable, 2)
+            offsets.append({
+                "child": child, "entity": parent,
+                "allocable": allocable, "offset": 0.0, "final": 0.0,
+                "multi_parent": True,
+                "reason": "多母公司结构：该母公司所在辖区未实施 IIR → 转入 UTPR 残池",
             })
             collected_paths.append((parent, 0.0))
             continue
@@ -1168,6 +1472,14 @@ def _allocate_iir_multi_parent(child: int, topup: float,
                               f"{threshold:.0%} 门槛 → 转入 UTPR 残池",
                 })
                 continue
+            if final > 0 and not _iir_on(ancestor):
+                _na[ancestor] = _alloc_round(_na.get(ancestor, 0.0) + final, 2)
+                offsets.append({
+                    "child": child, "entity": ancestor, "allocable": allocable,
+                    "offset": offset, "final": 0.0, "multi_parent": True,
+                    "reason": "多母公司结构上层：该辖区未实施 IIR → 转入 UTPR 残池",
+                })
+                continue
             offsets.append({
                 "child": child, "entity": ancestor, "allocable": allocable,
                 "offset": offset, "final": final, "multi_parent": True,
@@ -1198,7 +1510,8 @@ def allocate_iir(results: list[dict],
                  parent_idx: dict[int, int | None],
                  ownership: dict[int, float] | None = None,
                  min_ownership: float | None = None,
-                 parent_shares: dict[int, dict[int, float]] | None = None) -> dict:
+                 parent_shares: dict[int, dict[int, float]] | None = None,
+                 iir_applies: dict[int, bool] | None = None) -> dict:
     """IIR（收入纳入规则）：母公司从低税子公司「上收」补税义务。
 
     多层持股按 GloBE Art 2.1.4（POPE）+ Art 2.3.2（IIR 抵免）落地，
@@ -1216,13 +1529,23 @@ def allocate_iir(results: list[dict],
 
     已知范围限制（已在 test_oecd_vectors.KNOWN_OUT_OF_SCOPE 登记）：
     每辖区仅支持单一母公司，因此「同一辖区被多个母公司分别持股」的多路径结构
-    （官方 Example 2.3.2-2）无法表达；也不建模各辖区是否已实施 IIR。
+    （官方 Example 2.3.2-2）无法表达。
+
+    **辖区是否已实施 IIR**（`iir_applies`，2026-10-20 新增）：
+    - `iir_applies[idx] is False` → 该辖区**不承担 IIR 上收**，其本应上收的份额
+      留在 residual → 进入 UTPR 残池；
+    - 该层**不计入** `collected`、**不递增** `charged_below`（它并没有真收上来，
+      否则上层会被误当"下层已收"而全额抵免）、**不进** `covered` / `included_total`；
+    - **判定顺序**：`final<=0` → `10% 门槛` → `iir_applies`（门槛优先于开关）；
+    - 缺该字段（旧数据）→ 按 `True` 处理（向后兼容，结果逐位不变）。
 
     Args:
         results: assess_jurisdiction 返回的列表
         parent_idx: {辖区 index → 母辖区 index | None（UPE）}
         ownership: {辖区 index → 持股比例 0.0–1.0}，默认 1.0（100%）
         min_ownership: IIR 最低持股门槛，默认取规则库 `params.iir_min_ownership`
+        parent_shares: 多母公司结构的持股拆分（可选）
+        iir_applies: {辖区 index → 该辖区是否已实施 IIR}，缺省视为 True
 
     Returns:
         {
@@ -1233,9 +1556,15 @@ def allocate_iir(results: list[dict],
             "offsets": [{child, entity, allocable, offset, final, reason}],
                                                   # 多层链上层"应分担/被抵免"明细（透明化）
             "below_threshold": {parent_idx: float},  # 因未达门槛未纳入 IIR 的金额
+            "not_applicable": {parent_idx: float},   # 因该辖区未实施 IIR 而未上收、转 UTPR 的金额
         }
     """
     own = ownership or {}
+    iir_map = iir_applies or {}
+
+    def _iir_on(idx: int) -> bool:
+        return bool(iir_map.get(idx, True))
+
     threshold = IIR_MIN_OWNERSHIP if min_ownership is None else float(min_ownership)
     collected: dict[int, float] = {}
     covered: set[int] = set()
@@ -1243,6 +1572,7 @@ def allocate_iir(results: list[dict],
     flows: list[dict] = []
     offsets: list[dict] = []
     below_threshold: dict[int, float] = {}
+    not_applicable: dict[int, float] = {}
 
     for i, r in enumerate(results):
         topup = float(r.get("topup_tax") or 0.0)
@@ -1256,7 +1586,8 @@ def allocate_iir(results: list[dict],
             _allocate_iir_multi_parent(i, topup, share_map, threshold, collected,
                                        covered, residual, flows, offsets,
                                        below_threshold, parent_idx, own,
-                                       len(results))
+                                       len(results), iir_map=iir_map,
+                                       not_applicable=not_applicable)
             continue
         chain = ownership_chain(i, parent_idx, own, count=len(results))
         if not chain:
@@ -1291,6 +1622,18 @@ def allocate_iir(results: list[dict],
                               "不适用 IIR → 转入 UTPR 残池",
                 })
                 continue
+            if not _iir_on(ancestor):
+                # 该辖区未实施 IIR → 不上收；份额留在 residual → UTPR 残池。
+                # 注意：不递增 charged_below（它没有真收上来，否则上层会被误抵免）。
+                not_applicable[ancestor] = _alloc_round(
+                    not_applicable.get(ancestor, 0.0) + final, 2)
+                offsets.append({
+                    "child": i, "entity": ancestor, "allocable": _alloc_round(allocable, 2),
+                    "offset": _alloc_round(offset, 2), "final": 0.0,
+                    "skipped": final,
+                    "reason": "该辖区未实施 IIR → 转入 UTPR 残池",
+                })
+                continue
             collected[ancestor] = _alloc_round(collected.get(ancestor, 0.0) + final, 2)
             charged_below += 1
             included_total += final
@@ -1315,6 +1658,7 @@ def allocate_iir(results: list[dict],
         "flows": flows,
         "offsets": offsets,
         "below_threshold": below_threshold,
+        "not_applicable": not_applicable,
     }
 
 
@@ -1435,7 +1779,8 @@ def run_allocation(results: list[dict],
                    utpr_applies: dict[int, bool],
                    qdmtt_applies: dict[int, bool] | None = None,
                    ownership: dict[int, float] | None = None,
-                   parent_shares: dict[int, dict[int, float]] | None = None) -> dict:
+                   parent_shares: dict[int, dict[int, float]] | None = None,
+                   iir_applies: dict[int, bool] | None = None) -> dict:
     """运行完整的 QDMTT → IIR → UTPR 分配流程（GloBE Agreed Rule Order）。
 
     Args:
@@ -1474,7 +1819,7 @@ def run_allocation(results: list[dict],
 
     # ── 第二步：IIR ──
     iir = allocate_iir(iir_results, parent_idx, ownership,
-                       parent_shares=parent_shares)
+                       parent_shares=parent_shares, iir_applies=iir_applies)
 
     # UPE 自身补税不从 UTPR 走（直接缴纳），仅子公司未被 IIR 覆盖的才进残余池
     upe_indices = {i for i, p in parent_idx.items() if p is None}
@@ -1576,6 +1921,7 @@ def compute_tax_flow(results: list[dict],
     """
     qdmtt_collected = alloc["qdmtt"]["qdmtt_collected"]
     iir_flows = alloc["iir"]["flows"]
+    iir_not_applicable = (alloc["iir"].get("not_applicable") or {})
     utpr_detail = alloc["utpr"]["detail"]
     utpr_allocated = alloc["utpr"]["allocated"]
     utpr_pool = alloc["utpr"]["total_pool"]
@@ -1588,6 +1934,17 @@ def compute_tax_flow(results: list[dict],
         iir_export[src] = iir_export.get(src, 0.0) + f["amount"]
         parent_name = rows[f["to"]]["name"] if f["to"] < len(rows) else "?"
         iir_to[src] = (f["to"], parent_name)
+
+    # 因"该辖区未实施 IIR"而未上收、从而转入 UTPR 残池的金额（按 source 汇总）
+    iir_skipped: dict[int, float] = {}
+    for off in (alloc["iir"].get("offsets") or []):
+        if "未实施 IIR" in str(off.get("reason") or ""):
+            src = off.get("child")
+            if src is None:
+                continue
+            amt = float(off.get("skipped") or 0.0)
+            if amt > 0:
+                iir_skipped[src] = _alloc_round(iir_skipped.get(src, 0.0) + amt, 2)
 
     utpr_export: dict[int, float] = {}
     utpr_recipient_map: dict[int, list[dict]] = {}  # source → [{name, amount}]
@@ -1618,6 +1975,11 @@ def compute_tax_flow(results: list[dict],
             _, parent_name = iir_to.get(i, (None, "?"))
             flows.append({"type": "iir", "to_name": parent_name, "amount": iir_out,
                           "label": f"IIR → {parent_name}"})
+        skipped_amt = iir_skipped.get(i, 0.0)
+        if skipped_amt > 0:
+            flows.append({"type": "iir_skipped", "to_name": "UTPR",
+                          "amount": skipped_amt,
+                          "label": "IIR 未实施 → 转 UTPR"})
         if utpr_out > 0:
             recip_list = utpr_recipient_map.get(i, [])
             if len(recip_list) == 1:
@@ -1642,6 +2004,7 @@ def compute_tax_flow(results: list[dict],
             "topup": topup,
             "qdmtt_retained": qdmtt_amt,
             "iir_exported": iir_out,
+            "iir_not_applicable": iir_skipped.get(i, 0.0),
             "iir_to_name": iir_to.get(i, (None, None))[1],
             "iir_to_idx": iir_to.get(i, (None, None))[0],
             "utpr_exported": utpr_out,

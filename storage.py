@@ -8,6 +8,22 @@ from datetime import datetime
 
 DEFAULT_DB_PATH = os.path.join(os.path.dirname(__file__), "data", "pillar_two.db")
 
+# 方案版本快照目录（缺陷 D4：同名覆盖前先留档）
+VERSIONS_DIR = os.path.join(os.path.dirname(__file__), "data", "scenario_versions")
+
+
+class ScenarioNameExists(ValueError):
+    """同名方案已存在，且调用方要求不覆盖（`on_conflict="error"`）。
+
+    缺陷 D4（2026-10-17 记录）：`save()` 过去一律按名称静默覆盖 ✗，
+    曾导致 25 辖区的方案A 被一次上传数据覆盖。
+    """
+
+
+class ScenarioSnapshotError(RuntimeError):
+    """旧版本快照写入失败（`on_conflict="version"` 时）。"""
+
+
 # 默认样本数据（与 app.py 原始初始化一致）
 DEFAULT_ROWS = [
     {"name": "中国大陆", "profit": 5000.0, "current_tax": 600.0, "deferred_tax": 50.0,
@@ -72,16 +88,47 @@ CREATE TABLE IF NOT EXISTS scenario_specs (
 """
 
 
+def _ensure_id(obj: dict) -> None:
+    """缺失主键时补 uuid；已有 id 保持不变（不能重生成，否则会断掉回转引用 ✗）。"""
+    if not obj.get("id"):
+        obj["id"] = uuid.uuid4().hex
+
+
 def _normalize_rows(rows):
-    """兼容旧数据：tax_paid -> current_tax。"""
+    """兼容旧数据：tax_paid -> current_tax；并保证行/台账条目/回转记录都有 id。"""
     normalized = []
     for row in (rows or []):
         if not isinstance(row, dict):
             continue
         r = dict(row)
+        # 批次 17：剔除以 "_" 开头的内部键（如 _dtl_imported）→ 不落库 ✗
+        # 它们是会话内的临时标记（用于"本次 DTL 导入"判定），存进方案会污染数据。
+        for _key in [k for k in r if isinstance(k, str) and k.startswith("_")]:
+            r.pop(_key, None)
         if "tax_paid" in r:
             r.setdefault("current_tax", r["tax_paid"])
             r.pop("tax_paid", None)
+        # 写入时强制分配 id（中断/异常路径会留下无 id 对象 → W014 报错 ✗，见批次 4 Phase 0）
+        _ensure_id(r)
+        ledger = r.get("dtl_ledger")
+        if isinstance(ledger, list):
+            new_ledger = []
+            for entry in ledger:
+                if not isinstance(entry, dict):
+                    new_ledger.append(entry)
+                    continue
+                e = dict(entry)
+                _ensure_id(e)
+                revs = e.get("reversals")
+                if isinstance(revs, list):
+                    e["reversals"] = [
+                        dict(x) if isinstance(x, dict) else x for x in revs
+                    ]
+                    for rev in e["reversals"]:
+                        if isinstance(rev, dict):
+                            _ensure_id(rev)
+                new_ledger.append(e)
+            r["dtl_ledger"] = new_ledger
         normalized.append(r)
     return normalized
 
@@ -154,19 +201,58 @@ class Storage:
 
     # ── CRUD ──
 
+    def _snapshot_scenario(self, name: str, data_json: str | None) -> str:
+        """把被覆盖方案的旧内容写入 data/scenario_versions/，返回文件路径。"""
+        os.makedirs(VERSIONS_DIR, exist_ok=True)
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        safe = "".join(ch for ch in str(name)
+                       if ch not in '\\/:*?"<>|').strip() or "scenario"
+        path = os.path.join(VERSIONS_DIR, f"{safe}_{stamp}.json")
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump({"name": name, "snapshot_at": stamp,
+                       "data": json.loads(data_json or "{}")},
+                      handle, ensure_ascii=False, indent=2)
+        return path
+
+    def list_snapshots(self, name: str | None = None) -> list[str]:
+        """列出方案版本快照文件（按名过滤）。"""
+        if not os.path.isdir(VERSIONS_DIR):
+            return []
+        files = sorted(os.listdir(VERSIONS_DIR))
+        if name:
+            return [f for f in files if f.startswith(str(name))]
+        return files
+
     def save(self, name: str, rows: list[dict],
-             sbie_year: int, fs_upload_mode: str, unit: str | None = None) -> str:
+             sbie_year: int, fs_upload_mode: str, unit: str | None = None,
+             on_conflict: str = "overwrite") -> str:
         """Upsert 方案（按名称）。返回方案 id。更新 is_last=1。
 
         unit: 数据自己声明的金额单位（如 "万元"）。
             None（默认）= **保留已登记的单位** —— 否则任何一个不知道单位的会话
             （例如另开一个页面、或程序化调用）保存时都会把它抹掉；
             传 "" 表示显式清空。
+
+        on_conflict: 同名已存在时怎么办（缺陷 D4：过去是**静默覆盖** ✗）
+            - "overwrite"（默认，兼容既有调用方）：直接覆盖，旧行为；
+            - "error"：抛 `ScenarioNameExists`，**不写库**（界面保存路径用这个）；
+            - "version"：先把旧版本快照写入 `data/scenario_versions/`，再覆盖。
         """
         conn = self._connect()
         existing = conn.execute(
             "SELECT id, data FROM scenarios WHERE name = ?", (name,)
         ).fetchone()
+
+        mode = (on_conflict or "overwrite").strip().lower()
+        if existing and mode == "error":
+            conn.close()
+            raise ScenarioNameExists(f"方案「{name}」已存在")
+        if existing and mode == "version":
+            try:
+                self._snapshot_scenario(name, existing["data"])
+            except Exception as exc:      # noqa: BLE001 - 快照失败不应阻断保存
+                conn.close()
+                raise ScenarioSnapshotError(f"旧版本快照失败：{exc}") from exc
 
         if unit is None:
             unit = ""

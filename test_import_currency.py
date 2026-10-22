@@ -44,7 +44,12 @@ def test_unknown_currency_reported():
     csv_text = "辖区,利润,当期所得税,币种\n火星,100,10,XXX\n"
     parsed = parse_csv(_csv(csv_text), rates={"CNY": 1.0})
     assert any("XXX" in e for e in parsed["errors"])
-    assert parsed["rows"] == []
+    # 批次 11 口径变更：缺汇率**不再丢弃整行** ✗ → 保留行 + 按 1.0 折算 + 打标记 ✓
+    # （静默丢数据比报错更危险；由校验层 W019 提示）
+    assert len(parsed["rows"]) == 1, "缺汇率应保留该行（批次 11 起）"
+    row = parsed["rows"][0]
+    assert row["fx_rate_missing"] == "XXX"
+    assert row["profit"] == 100.0
 
 
 def test_excel_multi_currency_conversion():

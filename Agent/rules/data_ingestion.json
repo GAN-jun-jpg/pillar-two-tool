@@ -123,6 +123,12 @@
       "utpr",
       "低税支付"
     ],
+    "iir_applies": [
+      "iir",
+      "收入纳入",
+      "收入纳入规则",
+      "收入纳入规则适用"
+    ],
     "revenue": [
       "收入",
       "revenue",
@@ -136,6 +142,14 @@
       "货币",
       "currency",
       "ccy"
+    ],
+    "statutory_rate": [
+      "适用税率",
+      "法定税率",
+      "所得税税率",
+      "statutory rate",
+      "statutory_rate",
+      "tax rate"
     ]
   },
   "boolean_parsing": {
@@ -159,15 +173,50 @@
     ]
   },
   "dtl_type_from_chinese": {
+    "_comment": "批次 11：补全 Art 4.4.5 七类的中文别名（此前只有英文名 → 中文表被吃成 Other ✗，导致丢掉豁免 ✗）",
     "固定资产": "Fixed Asset",
     "固定资本": "Fixed Asset",
+    "折旧": "Fixed Asset",
     "存货": "Inventory",
     "研发资本": "R&D Capitalization",
+    "研发资本化": "R&D Capitalization",
+    "研发费用": "R&D Capitalization",
+    "研发": "R&D Capitalization",
     "租赁": "Lease",
     "养老金": "Pension",
+    "退休金": "Pension",
     "商誉": "Goodwill",
     "加速折旧": "Accelerated Depreciation",
-    "其他": "Other"
+    "其他": "Other",
+    "政府许可": "Government Licence",
+    "许可成本": "Government Licence",
+    "许可": "Government Licence",
+    "退役与修复费": "Decommissioning",
+    "退役与修复费用": "Decommissioning",
+    "退役费用": "Decommissioning",
+    "修复费用": "Decommissioning",
+    "退役": "Decommissioning",
+    "公允价值": "Fair Value",
+    "公允价值变动": "Fair Value",
+    "外汇净收益": "FX Gain",
+    "汇兑净收益": "FX Gain",
+    "汇兑收益": "FX Gain",
+    "汇兑": "FX Gain",
+    "保险准备金": "Insurance Reserve",
+    "保单递延取得成本": "Insurance Reserve",
+    "再投资": "Reinvested Property",
+    "同辖区再投资": "Reinvested Property",
+    "会计政策变更": "Accounting Change",
+    "会计原则变更": "Accounting Change"
+  },
+  "dtl_import_column_keywords": {
+    "_comment": "批次 9：DTL 台账导入按表头名映射（列序无关）；值是子串匹配，最长命中优先",
+    "jurisdiction": ["辖区名称", "辖区", "国家地区", "国家/地区", "国家", "地区", "jurisdiction", "country"],
+    "dtl_year": ["DTL产生年份", "产生年份", "产生年", "生成年份", "计入年份", "origination year"],
+    "dtl_amount": ["DTL产生金额", "产生金额", "产生额", "origination amount"],
+    "dtl_type": ["DTL类型", "类型", "类别", "dtl type", "type"],
+    "rev_year": ["回转年份", "转回年份", "回转年", "转回年", "反向年份", "reverse year", "reversal year"],
+    "rev_amount": ["回转金额", "转回金额", "回转额", "转回额", "reverse amount", "reversal amount"]
   },
   "excluded_column_keywords": {
     "tangible_assets": [
